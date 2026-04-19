@@ -473,17 +473,11 @@ function isF5Closed(feed: MlbLiveFeedResponse): boolean {
   const currentInning = optionalNumber(linescore?.currentInning);
   if (currentInning !== undefined && currentInning >= 6) return true;
 
-  const inningHalf = String(linescore?.inningHalf ?? '').toLowerCase();
   const inningState = String(linescore?.inningState ?? '').toLowerCase();
-  const isTopInning = linescore?.isTopInning;
-
-  const mentionsEndOf5 =
-    inningHalf.includes('end') ||
-    inningHalf.includes('middle') ||
-    inningState.includes('end') ||
-    inningState.includes('middle');
-
-  if (mentionsEndOf5 && currentInning === 5 && isTopInning === false) {
+  if (
+    currentInning === 5 &&
+    (inningState === 'end' || inningState === 'ended' || inningState === 'final')
+  ) {
     return true;
   }
 
@@ -634,8 +628,12 @@ function getSelectionSide(
 
   if (selection.includes('over')) return 'over';
   if (selection.includes('under')) return 'under';
-  if (selection.includes(normalizeText(homeTeamName))) return 'home';
-  if (selection.includes(normalizeText(awayTeamName))) return 'away';
+
+  const normalizedHome = normalizeText(homeTeamName);
+  const normalizedAway = normalizeText(awayTeamName);
+
+  if (normalizedHome && selection.includes(normalizedHome)) return 'home';
+  if (normalizedAway && selection.includes(normalizedAway)) return 'away';
 
   return null;
 }
@@ -658,10 +656,16 @@ function getFirstFiveRuns(feed: MlbLiveFeedResponse): { home: number; away: numb
   const innings = feed.liveData?.linescore?.innings ?? [];
   if (innings.length < 5) return null;
 
+  const first5 = innings.slice(0, 5);
+
+  for (const inning of first5) {
+    if (optionalNumber(inning.away?.runs) === undefined) return null;
+  }
+
   let home = 0;
   let away = 0;
 
-  for (const inning of innings.slice(0, 5)) {
+  for (const inning of first5) {
     home += optionalNumber(inning.home?.runs) ?? 0;
     away += optionalNumber(inning.away?.runs) ?? 0;
   }
@@ -720,20 +724,58 @@ function buildAutoResultLabel(
   return `AUTO_${status.toUpperCase()} ${market} ${runs.away}-${runs.home}`;
 }
 
+async function settleF5Market(
+  pick: PickRow,
+  resolved: Extract<OfficialGameResolution, { kind: 'final' | 'live' }>,
+  feed: MlbLiveFeedResponse
+): Promise<PickRow | null> {
+  if (!isF5Closed(feed)) {
+    console.info(`skipped settlement: f5 not closed ${pick.game_id}`);
+    return null;
+  }
+
+  const runs = getFirstFiveRuns(feed);
+  if (!runs) {
+    console.info(`skipped settlement: missing linescore ${pick.game_id}`);
+    return null;
+  }
+
+  const side = getSelectionSide(pick, resolved.homeTeamName, resolved.awayTeamName);
+  if (!side) {
+    console.warn(`skipped settlement: unknown pick side ${pick.game_id}`);
+    return null;
+  }
+
+  const line =
+    typeof pick.execution_line === 'number'
+      ? pick.execution_line
+      : typeof pick.line === 'number'
+        ? pick.line
+        : null;
+
+  const status =
+    side === 'over' || side === 'under'
+      ? settleTotalMarket(side, line, runs)
+      : settleSideMarket(side, line, runs, 'F5');
+
+  if (!status) return null;
+
+  console.info(`f5 settlement result ${pick.game_id}: ${side} ${status} (${runs.away}-${runs.home})`);
+
+  return settlePickRecord({
+    pickId: pick.id,
+    status,
+    result: buildAutoResultLabel(status, 'F5', runs),
+    profitUnits: calculateProfitUnits(status, pick.execution_odds ?? pick.odds)
+  });
+}
+
 async function settleFinalPick(
   pick: PickRow,
   resolved: Extract<OfficialGameResolution, { kind: 'final' | 'live' }>
 ): Promise<PickRow | null> {
   const market = getResolvedMarket(pick);
   if (!market) return null;
-
-  const side = getSelectionSide(
-    pick,
-    resolved.homeTeamName,
-    resolved.awayTeamName
-  );
-
-  if (!side) return null;
 
   const feed = await fetchMlbJson<MlbLiveFeedResponse>(
     `${MLB_LIVE_API_BASE}/game/${resolved.gamePk}/feed/live`
@@ -744,8 +786,6 @@ async function settleFinalPick(
       feed.gameData?.status?.abstractGameState ??
       ''
   ).toLowerCase();
-  const abstractStatus = String(feed.gameData?.status?.abstractGameState ?? '');
-  const detailedStatus = String(feed.gameData?.status?.detailedState ?? '');
 
   if (
     feedStatus.includes('postpon') ||
@@ -756,21 +796,22 @@ async function settleFinalPick(
     return null;
   }
 
-  if (market !== 'F5') {
-    if (!(isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus))) {
-      console.info(`skipped settlement: game not final ${pick.game_id}`);
-      return null;
-    }
-  } else if (!isF5Closed(feed)) {
-    console.info(`skipped settlement: f5 not closed ${pick.game_id}`);
+  if (market === 'F5') {
+    return settleF5Market(pick, resolved, feed);
+  }
+
+  const abstractStatus = String(feed.gameData?.status?.abstractGameState ?? '');
+  const detailedStatus = String(feed.gameData?.status?.detailedState ?? '');
+
+  if (!(isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus))) {
+    console.info(`skipped settlement: game not final ${pick.game_id}`);
     return null;
   }
 
-  const runs =
-    market === 'F5'
-      ? getFirstFiveRuns(feed)
-      : getFinalRuns(feed);
+  const side = getSelectionSide(pick, resolved.homeTeamName, resolved.awayTeamName);
+  if (!side) return null;
 
+  const runs = getFinalRuns(feed);
   if (!runs) return null;
 
   const line =
@@ -783,12 +824,7 @@ async function settleFinalPick(
   const status =
     side === 'over' || side === 'under'
       ? settleTotalMarket(side, line, runs)
-      : settleSideMarket(
-          side,
-          line,
-          runs,
-          market === 'RL' ? 'RL' : market === 'F5' ? 'F5' : 'ML'
-        );
+      : settleSideMarket(side, line, runs, market === 'RL' ? 'RL' : 'ML');
 
   if (!status) return null;
 
