@@ -1947,6 +1947,7 @@ export default function HomePage() {
   const analyzedCount = useMemo(() => games.filter((game) => game.analysis.analyzed).length, [games]);
   const confirmedCount = useMemo(() => games.filter((game) => game.analysis.hasActivePick).length, [games]);
   const [solidDailyPick, setSolidDailyPick] = useState<SolidDailyCandidate | null>(null);
+  const [premiumDayClosed, setPremiumDayClosed] = useState<boolean | null>(null);
   const solidStorageDateKey = useMemo(() => getSolidStorageDateKey(0), []);
   const solidDailyCandidates = useMemo(() => {
     const sourceGames = todayGamesCache.length ? todayGamesCache : dayOffset === 0 ? games : [];
@@ -1994,16 +1995,21 @@ export default function HomePage() {
       })
       .sort((left, right) => right.score - left.score || (right.edge ?? 0) - (left.edge ?? 0) || (right.ev ?? 0) - (left.ev ?? 0));
 
-    console.log('[premium-audit] totalCandidates', sorted.length);
-    sorted.forEach((c, i) => console.log(`[premium-audit] candidate #${i + 1}`, {
-      gameId: c.gameId, matchup: c.gameLabel, marketType: c.market,
-      selection: c.selection, tier: c.confidence, score: c.score,
-      edge: c.edge, ev: c.ev, odds: c.odds
-    }));
     return sorted;
   }, [analysisByGame, dayOffset, games, solidStorageDateKey, todayGamesCache]);
 
   useEffect(() => {
+    setPremiumDayClosed(null);
+    fetch('/api/premium-lock')
+      .then((r) => r.json())
+      .then((data: { isClosed?: boolean }) => setPremiumDayClosed(data.isClosed ?? false))
+      .catch(() => setPremiumDayClosed(false));
+  }, [solidStorageDateKey]);
+
+  useEffect(() => {
+    // Wait for DB premium lock state before doing anything — avoids auto-picking when day is closed
+    if (premiumDayClosed === null) return;
+
     const stored = readSolidPick(solidStorageDateKey);
     const overrideCandidate =
       solidDailyCandidates.find((candidate) => matchesSolidOverride(candidate, solidStorageDateKey)) ?? null;
@@ -2011,6 +2017,13 @@ export default function HomePage() {
     const hasForcedOverride = Boolean(MANUAL_SOLID_PICK_OVERRIDES[solidStorageDateKey]);
 
     if (hasForcedOverride && !overrideCandidate) {
+      clearSolidPick(solidStorageDateKey);
+      setSolidDailyPick(null);
+      return;
+    }
+
+    // DB says day is closed — don't show or write any pick
+    if (premiumDayClosed) {
       clearSolidPick(solidStorageDateKey);
       setSolidDailyPick(null);
       return;
@@ -2080,7 +2093,7 @@ export default function HomePage() {
 
     writeSolidPick(initialPick);
     setSolidDailyPick(initialPick);
-  }, [games, solidDailyCandidates, solidStorageDateKey, todayGamesCache]);
+  }, [games, premiumDayClosed, solidDailyCandidates, solidStorageDateKey, todayGamesCache]);
 
   const applyExecutionSlotFromAnalysis = useCallback((json: AnalyzeResponse | null) => {
     setSelectedExecutionSlot(getExecOptions(json?.executionRecommendation)[0]?.slot ?? 'recommended');

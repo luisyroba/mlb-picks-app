@@ -468,26 +468,27 @@ function findScheduleGame(
 function isF5Closed(feed: MlbLiveFeedResponse): boolean {
   const linescore = feed.liveData?.linescore;
   const innings = linescore?.innings ?? [];
+
   if (innings.length < 5) return false;
 
+  const first5 = innings.slice(0, 5);
+
+  for (const inning of first5) {
+    if (
+      optionalNumber(inning.home?.runs) === undefined ||
+      optionalNumber(inning.away?.runs) === undefined
+    ) {
+      return false;
+    }
+  }
+
+  // también válido si ya empezó el 6to
   const currentInning = optionalNumber(linescore?.currentInning);
-  if (currentInning !== undefined && currentInning >= 6) return true;
-
-  const inningState = String(linescore?.inningState ?? '').toLowerCase();
-  if (
-    currentInning === 5 &&
-    (inningState === 'end' || inningState === 'ended' || inningState === 'final')
-  ) {
+  if (currentInning !== undefined && currentInning >= 6) {
     return true;
   }
 
-  const abstractStatus = String(feed.gameData?.status?.abstractGameState ?? '');
-  const detailedStatus = String(feed.gameData?.status?.detailedState ?? '');
-  if (isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus)) {
-    return true;
-  }
-
-  return false;
+  return true;
 }
 
 async function resolveOfficialGameForPick(
@@ -504,10 +505,10 @@ async function resolveOfficialGameForPick(
     console.info(`skipped settlement: game not final ${pick.game_id}`);
     return { kind: 'pending' };
   }
-  if (market !== 'F5' && context.espnStatus && !isOfficialFinalStatus(context.espnStatus)) {
-    console.info(`skipped settlement: game not final ${pick.game_id}`);
-    return { kind: 'pending' };
-  }
+if (isEspnPregameStatus(context.espnStatus)) {
+  console.info(`skipped settlement: game not final ${pick.game_id}`);
+  return { kind: 'pending' };
+}
 
   const scheduleDates = [
     context.officialDate,
@@ -658,16 +659,19 @@ function getFirstFiveRuns(feed: MlbLiveFeedResponse): { home: number; away: numb
 
   const first5 = innings.slice(0, 5);
 
-  for (const inning of first5) {
-    if (optionalNumber(inning.away?.runs) === undefined) return null;
-  }
-
   let home = 0;
   let away = 0;
 
   for (const inning of first5) {
-    home += optionalNumber(inning.home?.runs) ?? 0;
-    away += optionalNumber(inning.away?.runs) ?? 0;
+    const homeRuns = optionalNumber(inning.home?.runs);
+    const awayRuns = optionalNumber(inning.away?.runs);
+
+    if (homeRuns === undefined || awayRuns === undefined) {
+      return null;
+    }
+
+    home += homeRuns;
+    away += awayRuns;
   }
 
   return { home, away };
@@ -683,11 +687,11 @@ function settleSideMarket(
     ? runs.home - runs.away
     : runs.away - runs.home;
 
-  if (market === 'ML' && line === null) {
-    if (rawDiff > 0) return 'won';
-    if (rawDiff < 0) return 'lost';
-    return 'void';
-  }
+if (market === 'ML' && line === null) {
+  if (rawDiff > 0) return 'won';
+  if (rawDiff < 0) return 'lost';
+  return 'lost'; // o manejar empate distinto
+}
 
   const adjusted = rawDiff + (line ?? 0);
 

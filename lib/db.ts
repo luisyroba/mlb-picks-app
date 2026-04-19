@@ -867,6 +867,23 @@ export async function createPremiumDailyLock(
   return { created: true, payload };
 }
 
+export async function closePremiumDailyLock(
+  dateKey: string,
+  existingPayload: Record<string, unknown>
+): Promise<void> {
+  const boardKey = `premium-lock:${dateKey}`;
+  const closedPayload = {
+    ...existingPayload,
+    closed: true,
+    closedAt: new Date().toISOString(),
+    closeReason: 'game_settled'
+  };
+  await supabase
+    .from('odds_board_cache')
+    .update({ payload: closedPayload, updated_at: new Date().toISOString() })
+    .eq('board_key', boardKey);
+}
+
 export async function listOddsBoardCachesByPrefix(
   prefix: string
 ): Promise<OddsBoardCacheRow[]> {

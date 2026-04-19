@@ -82,3 +82,4 @@ export function clearSolidPick(dateKey: string) {
     window.localStorage.removeItem(storageKey);
   }
 }
+

@@ -5,6 +5,7 @@ import {
   listConfirmedPicks,
   getPremiumDailyLock,
   createPremiumDailyLock,
+  closePremiumDailyLock,
   supabase
 } from '@/lib/db';
 import { autoSettlePendingPicks } from '@/lib/auto-settle-picks';
@@ -449,13 +450,6 @@ function buildSolidPickAudit(
   const descendingHistory = [...history].reverse();
   const activeToday = descendingHistory.find((item) => item.status === 'pending') ?? null;
 
-  console.log('[premium-audit] premiumCandidateSource', `${grouped.size} A-tier picks agrupados por fecha`);
-  console.log('[premium-audit] premiumSelected', activeToday ? {
-    gameId: activeToday.gameId, matchup: activeToday.gameId,
-    marketType: activeToday.market, selection: activeToday.selection,
-    tier: activeToday.confidence, score: activeToday.score,
-    edge: activeToday.edge, ev: activeToday.ev, odds: activeToday.executionOdds
-  } : 'null — sin pick pending hoy');
   const settledHistory = descendingHistory.filter((item) => item.status !== 'pending');
   const graded = settledHistory.filter((item) => item.status === 'won' || item.status === 'lost');
   const won = graded.filter((item) => item.status === 'won').length;
@@ -1027,10 +1021,6 @@ export async function GET() {
       dedupGroups.set(dedupKey, group);
     }
 
-    if (rawTodayCandidates.length > dedupGroups.size) {
-      console.log('[premium-duplicates-detected]', rawTodayCandidates.length, '->', dedupGroups.size);
-    }
-
     const solidTodayRanking = [...dedupGroups.values()]
       .map((group) => {
         const sorted = [...group].sort((a, b) => b.score - a.score);
@@ -1054,17 +1044,27 @@ export async function GET() {
           a.gameId.localeCompare(b.gameId)
       );
 
-    console.log('[premium-ranking-final]', solidTodayRanking.map((p) => ({
-      gameId: p.gameId, market: p.market, selection: p.selection,
-      score: p.score, prevScore: p.prevScore,
-      edge: p.edge, ev: p.ev, prob: p.estimatedProbability, odds: p.executionOdds
-    })));
-
     // --- Premium daily lock (DB-backed, cross-device) ---
     let lockPayload = await getPremiumDailyLock(todayDateKey).catch(() => null);
 
+    // If the locked game has settled, the day is closed — don't reopen to pick a new one
+    let premiumClosed = false;
+    if (lockPayload) {
+      const p = lockPayload as Record<string, unknown>;
+      if (p.closed === true) {
+        premiumClosed = true;
+      } else {
+        const lockedGameId = String(p.gameId ?? '');
+        const lockedRecord = confirmedPicks.find((pick) => String(pick.game_id) === lockedGameId);
+        if (lockedRecord && lockedRecord.status !== 'pending') {
+          premiumClosed = true;
+          await closePremiumDailyLock(todayDateKey, p).catch(() => null);
+        }
+      }
+    }
+
     const liveTop = solidTodayRanking[0];
-    if (!lockPayload && liveTop?.gameStartTime) {
+    if (!premiumClosed && !lockPayload && liveTop?.gameStartTime) {
       const lockThreshold = new Date(liveTop.gameStartTime).getTime() - PREMIUM_LOCK_MINUTES * 60 * 1000;
       if (Date.now() >= lockThreshold) {
         const newLockData: Record<string, unknown> = {
@@ -1088,12 +1088,14 @@ export async function GET() {
       }
     }
 
-    const isLocked = lockPayload !== null;
+    const isLocked = !premiumClosed && lockPayload !== null;
     let premiumPick: PremiumPickResult | null = null;
     let betterPickPostLock = false;
     let betterPick: PremiumPickResult | null = null;
 
-    if (isLocked && lockPayload) {
+    if (premiumClosed) {
+      // Day closed — locked game settled; don't surface a new pick or ranking
+    } else if (isLocked && lockPayload) {
       const p = lockPayload as Record<string, unknown>;
       premiumPick = {
         gameId: String(p.gameId ?? ''),
@@ -1209,9 +1211,10 @@ export async function GET() {
       },
       solidPick: {
         ...solidPick,
-        todayRanking: solidTodayRanking,
+        todayRanking: premiumClosed ? [] : solidTodayRanking,
         premiumPick,
         isLocked,
+        isClosed: premiumClosed,
         betterPickPostLock,
         ...(betterPick ? { betterPick } : {})
       },

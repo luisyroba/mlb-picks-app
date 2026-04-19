@@ -145,6 +145,7 @@ type StatsResponse = {
       lockReason?: string;
     } | null;
     isLocked?: boolean;
+    isClosed?: boolean;
     betterPickPostLock?: boolean;
     betterPick?: {
       gameId: string;
@@ -835,7 +836,14 @@ export default function StatsPage() {
                         <span className="rounded-full border border-[#ead18f]/70 bg-[rgba(255,248,224,0.9)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8a6115]">Lock</span>
                       )}
                     </div>
-                    {stats?.solidPick?.premiumPick ? (() => {
+                    {stats?.solidPick?.isClosed ? (
+                      <>
+                        <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">Pick sólido del día finalizado</div>
+                        <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
+                          El juego de hoy ya fue resuelto. El sistema no abrirá un nuevo pick para este día.
+                        </div>
+                      </>
+                    ) : stats?.solidPick?.premiumPick ? (() => {
                       const pp = stats.solidPick!.premiumPick!;
                       const settlementInfo = activeSolidPick?.gameId === pp.gameId ? activeSolidPick : null;
                       return (
@@ -938,7 +946,11 @@ export default function StatsPage() {
                       }));
 
                       if (!topItems.length) {
-                        return <div className="py-2 text-[11px] text-[var(--ink-soft)]">Sin candidatos para hoy</div>;
+                        return (
+                          <div className="py-2 text-[11px] text-[var(--ink-soft)]">
+                            {stats?.solidPick?.isClosed ? 'Día cerrado — sin ranking activo' : 'Sin candidatos para hoy'}
+                          </div>
+                        );
                       }
 
                       return (
