@@ -205,15 +205,24 @@ function getGameDate(snapshotStartTime?: string | null, fallback?: string | null
   return fallback ?? null;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))
+  ]);
+}
+
 export async function GET() {
   try {
-    try {
-      await revertIncorrectRecentAutoSettlements({ hours: 36, limit: 300 });
-      await autoSettlePendingPicks();
-      await autoSettleRecentBackfill({ days: 5, limit: 250 });
-    } catch {
-      // Keep the picks page available even if settlement cannot refresh right now.
-    }
+    await withTimeout(
+      (async () => {
+        await revertIncorrectRecentAutoSettlements({ hours: 36, limit: 300 });
+        await autoSettlePendingPicks();
+        await autoSettleRecentBackfill({ days: 5, limit: 250 });
+      })(),
+      4000,
+      undefined
+    ).catch(() => undefined);
 
     const data = await listConfirmedPicks();
     const snapshotIds = data

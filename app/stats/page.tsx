@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  clearSolidPick,
   readSolidPick,
+  writeSolidPick,
   type PersistedSolidPick
 } from '@/lib/solid-pick-client';
 import {
@@ -433,29 +433,6 @@ function BucketPerformanceBar({ bucket }: { bucket: BucketSummary }) {
   );
 }
 
-function groupRecentByDate(items: RecentItem[]) {
-  const groups = new Map<string, RecentItem[]>();
-  for (const item of items) {
-    const source = item.gameDate || item.createdAt || item.updatedAt;
-    const key = source
-      ? formatDateKeyForTimezone(0, {
-          dashed: true,
-          referenceDate: new Date(source)
-        })
-      : 'sin-fecha';
-    groups.set(key, [...(groups.get(key) ?? []), item]);
-  }
-
-  return [...groups.entries()]
-    .sort((left, right) => right[0].localeCompare(left[0]))
-    .map(([key, list]) => ({ key, list }));
-}
-
-function resolveDefaultDateKey(keys: string[], preferredKey: string) {
-  if (keys.includes(preferredKey)) return preferredKey;
-  return keys[0] ?? '';
-}
-
 function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
   const validPoints = points.filter(
     (point) =>
@@ -472,9 +449,9 @@ function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
   }
 
   const width = 720;
-  const height = 164;
+  const height = 130;
   const paddingX = 26;
-  const paddingY = 18;
+  const paddingY = 14;
   const values = validPoints.map((point) => point.cumulativeProfitUnits);
   const minValue = Math.min(0, ...values);
   const maxValue = Math.max(0, ...values);
@@ -539,7 +516,6 @@ export default function StatsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeSolidPick, setActiveSolidPick] = useState<PersistedSolidPick | null>(null);
-  const [selectedRecentDate, setSelectedRecentDate] = useState('');
   const [solidHistoryVisibleCount, setSolidHistoryVisibleCount] = useState(SOLID_HISTORY_PAGE_SIZE);
 
   async function loadStats() {
@@ -574,27 +550,25 @@ export default function StatsPage() {
 
     const matchingPick = (stats?.recent ?? []).find((item) => item.gameId === stored.gameId);
     if (matchingPick && matchingPick.status !== 'pending') {
-      clearSolidPick(dateKey);
-      setActiveSolidPick(null);
+      const settled: PersistedSolidPick = {
+        ...stored,
+        settledStatus: matchingPick.status as 'won' | 'lost' | 'void',
+        profitUnits: matchingPick.profitUnits ?? null
+      };
+      writeSolidPick(settled);
+      setActiveSolidPick(settled);
       return;
     }
 
     setActiveSolidPick(stored);
   }, [stats?.recent]);
 
-  const groupedRecent = useMemo(() => groupRecentByDate(stats?.recent ?? []), [stats?.recent]);
-  const recentDateOptions = useMemo(() => groupedRecent.map((group) => group.key), [groupedRecent]);
-  const visibleRecentGroup = useMemo(
-    () => groupedRecent.find((group) => group.key === selectedRecentDate) ?? groupedRecent[0] ?? null,
-    [groupedRecent, selectedRecentDate]
-  );
   const summary = stats?.summary ?? null;
   const usage = stats?.usage ?? null;
   const trend = stats?.trend ?? [];
   const byConfidence = stats?.byConfidence ?? [];
   const byMarket = stats?.byMarket ?? [];
   const byEdgeRange = stats?.byEdgeRange ?? [];
-  const recent = stats?.recent ?? [];
   const solidPick = useMemo(() => {
     const base = stats?.solidPick ?? {
       today: null,
@@ -663,20 +637,11 @@ export default function StatsPage() {
   const hasMoreSolidHistory = solidPick.history.length > visibleSolidHistory.length;
 
   useEffect(() => {
-    setSelectedRecentDate((current) => {
-      const next = resolveDefaultDateKey(recentDateOptions, getTodayDateKey());
-      if (!next) return '';
-      if (current && recentDateOptions.includes(current)) return current;
-      return next;
-    });
-  }, [recentDateOptions]);
-
-  useEffect(() => {
     setSolidHistoryVisibleCount(SOLID_HISTORY_PAGE_SIZE);
   }, [solidPick.history]);
 
   return (
-    <main className="px-3 pb-8 pt-4 lg:px-5">
+    <main className="px-3 pb-4 pt-3 lg:px-5">
       <div className="mx-auto max-w-[1620px]">
         <section className="glass-panel rounded-[1.9rem] p-4 lg:p-5">
           <div className="flex flex-wrap items-center justify-end gap-3">
@@ -689,37 +654,44 @@ export default function StatsPage() {
           </div>
 
           {summary && (
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-              <div className="navy-panel rounded-[1.25rem] p-3.5 text-white">
+            <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+              <div className="navy-panel rounded-[1.25rem] p-3 text-white">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-white/60">Total picks</div>
-                <div className="mt-1 text-[1.9rem] font-semibold">{summary.totalPicks}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold">{summary.totalPicks}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3.5">
+              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Win rate</div>
-                <div className="mt-1 text-[1.9rem] font-semibold text-[var(--ink-strong)]">{formatRate(summary.winRate)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatRate(summary.winRate)}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3.5">
+              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Profit</div>
-                <div className="mt-1 text-[1.9rem] font-semibold text-[var(--ink-strong)]">{formatUnits(summary.totalProfitUnits)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatUnits(summary.totalProfitUnits)}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3.5">
+              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">ROI</div>
-                <div className="mt-1 text-[1.9rem] font-semibold text-[var(--ink-strong)]">{formatMetric(summary.roi)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatMetric(summary.roi)}</div>
               </div>
-              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3.5">
+              <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Pendientes</div>
-                <div className="mt-1 text-[1.9rem] font-semibold text-[var(--ink-strong)]">{summary.pendingCount}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{summary.pendingCount}</div>
               </div>
             </div>
           )}
         </section>
 
-        {loading && <div className="glass-panel mt-4 rounded-[1.4rem] p-4 text-[var(--ink-soft)]">Cargando stats...</div>}
+        {loading && (
+          <div className="glass-panel mt-4 rounded-[1.4rem] p-4">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--surface-soft)]">
+              <div className="h-full w-2/3 animate-pulse rounded-full bg-[var(--surface-navy)]/50" />
+            </div>
+            <div className="mt-2.5 text-xs uppercase tracking-[0.18em] text-[var(--ink-muted)]">Cargando stats...</div>
+          </div>
+        )}
         {error && <div className="glass-panel mt-4 rounded-[1.4rem] p-4 text-rose-700">{error}</div>}
 
         {!loading && !error && summary && usage && (
           <>
-            <section className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+            <section className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
               <div className="glass-panel rounded-[1.7rem] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Profit acumulado</h2>
@@ -728,9 +700,9 @@ export default function StatsPage() {
                   </div>
                 </div>
                 <div className="mt-3"><ProfitTrendChart points={trend} /></div>
-                <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <div className="mt-2 grid gap-2 md:grid-cols-4">
                   {trend.slice(-4).map((point) => (
-                    <div key={point.date} className="rounded-[1rem] bg-[var(--surface-soft)] px-3 py-2.5">
+                    <div key={point.date} className="rounded-[1rem] bg-[var(--surface-soft)] px-2.5 py-2">
                       <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">{formatShortDate(point.date)}</div>
                       <div className="mt-1 text-base font-semibold text-[var(--ink-strong)]">{formatUnits(point.cumulativeProfitUnits)}</div>
                       <div className="mt-1 text-[11px] text-[var(--ink-soft)]">ROI {formatMetric(point.cumulativeRoi)} / WR {formatRate(point.cumulativeWinRate)}</div>
@@ -747,17 +719,26 @@ export default function StatsPage() {
                       <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.db.estimatedUsedMb.toFixed(3)} MB</div>
                     </div>
                     <div className="text-right text-[11px] text-[var(--ink-soft)]">
-                      Libre {usage.db.remainingMb.toFixed(3)} MB
+                      {usage.db.percentUsed.toFixed(1)}% de 500 MB
                     </div>
                   </div>
                   <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
                     <div
                       className="h-full rounded-full"
                       style={{
-                        ...performanceBarStyle(getPerformanceTone(null, usage.db.remainingMb > 10 ? 1 : -1, null)),
-                        width: `${Math.min(100, usage.db.percentUsed)}%`
+                        width: `${Math.min(100, usage.db.percentUsed)}%`,
+                        background: usage.db.percentUsed < 70
+                          ? 'var(--tone-good)'
+                          : usage.db.percentUsed < 90
+                            ? 'var(--tone-mid)'
+                            : 'var(--tone-bad)'
                       }}
                     />
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-[var(--ink-soft)]">
+                    {usage.db.estimatedUsedMb > 0
+                      ? `Libre aprox. ${usage.db.remainingMb.toFixed(0)} MB · excluye payloads`
+                      : usage.db.note}
                   </div>
                 </div>
 
@@ -766,6 +747,7 @@ export default function StatsPage() {
                     <div>
                       <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Odds</div>
                       <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.odds.monthCount}</div>
+                      <div className="text-[11px] text-[var(--ink-soft)]">/ {usage.odds.monthlyLimit} mes</div>
                     </div>
                     <div className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${usage.odds.withinBudget ? 'border border-emerald-200 bg-emerald-50 text-emerald-800' : 'border border-rose-200 bg-rose-50 text-rose-800'}`}>
                       {usage.odds.withinBudget ? 'En rango' : 'Ajustar'}
@@ -780,7 +762,7 @@ export default function StatsPage() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Vercel</div>
-                      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.vercel.planMode}</div>
+                      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">Hobby</div>
                     </div>
                     {usage.vercel.live && (
                       <div className="text-right text-[11px] text-[var(--ink-soft)]">
@@ -795,9 +777,9 @@ export default function StatsPage() {
               </div>
             </section>
 
-            <section className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
-              <div className="space-y-4">
-                <section className="relative overflow-hidden rounded-[1.6rem] border border-[#ead18f]/45 bg-[linear-gradient(145deg,rgba(255,248,224,0.92),rgba(255,255,255,0.98))] p-4 shadow-[0_18px_44px_rgba(160,126,50,0.14)]">
+            <section className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+              <div className="space-y-3">
+                <section className="relative overflow-hidden rounded-[1.6rem] border border-[#ead18f]/45 bg-[linear-gradient(145deg,rgba(255,248,224,0.92),rgba(255,255,255,0.98))] p-3 shadow-[0_18px_44px_rgba(160,126,50,0.14)]">
                     <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,221,136,0.25),transparent_46%),radial-gradient(circle_at_bottom_right,rgba(189,146,53,0.14),transparent_34%)]" />
                     <div className="relative flex items-center justify-between gap-3">
                       <div>
@@ -809,22 +791,22 @@ export default function StatsPage() {
                       </div>
                     </div>
 
-                    <div className="relative mt-3 grid gap-3 md:grid-cols-4">
+                    <div className="relative mt-3 grid gap-2 md:grid-cols-4">
                       <div className="rounded-[1.2rem] bg-[linear-gradient(135deg,#7f5a11,#d4a942)] p-3 text-white shadow-[0_18px_30px_rgba(127,90,17,0.22)]">
                         <div className="text-[10px] uppercase tracking-[0.18em] text-white/60">Record</div>
-                        <div className="mt-1 text-2xl font-semibold">{solidPick?.summary.won ?? 0}/{solidPick?.summary.total ?? 0}</div>
+                        <div className="mt-1 text-xl font-semibold">{solidPick?.summary.won ?? 0}/{solidPick?.summary.total ?? 0}</div>
                       </div>
                       <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
                         <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Settled</div>
-                        <div className="mt-1 text-2xl font-semibold text-[var(--ink-strong)]">{solidPick?.summary.settled ?? 0}</div>
+                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{solidPick?.summary.settled ?? 0}</div>
                       </div>
                       <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
                         <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">WR</div>
-                        <div className="mt-1 text-2xl font-semibold text-[var(--ink-strong)]">{formatRate(solidPick?.summary.winRate)}</div>
+                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{formatRate(solidPick?.summary.winRate)}</div>
                       </div>
                       <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
                         <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Racha</div>
-                        <div className="mt-1 text-2xl font-semibold text-[var(--ink-strong)]">{formatStreak(solidPick?.summary.currentStreak)}</div>
+                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{formatStreak(solidPick?.summary.currentStreak)}</div>
                       </div>
                     </div>
 
@@ -860,7 +842,12 @@ export default function StatsPage() {
                             </div>
                             <div className="rounded-[0.95rem] bg-white/70 px-3 py-2">
                               <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Estado</div>
-                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">pending</div>
+                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">
+                                {activeSolidPick.settledStatus?.toUpperCase() ?? 'PENDING'}
+                              </div>
+                              {activeSolidPick.settledStatus && typeof activeSolidPick.profitUnits === 'number' && (
+                                <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{formatUnits(activeSolidPick.profitUnits)}</div>
+                              )}
                             </div>
                           </div>
                         )}
@@ -882,7 +869,7 @@ export default function StatsPage() {
                           <div className="text-[11px] text-[var(--ink-soft)]">{solidPick.history.length} settles</div>
                         </div>
                         {visibleSolidHistory.map((item) => (
-                          <div key={`${item.date}-${item.gameId}`} className="rounded-[1.05rem] bg-[var(--surface-soft)] p-3">
+                          <div key={`${item.date}-${item.gameId}`} className="rounded-[1.05rem] bg-[var(--surface-soft)] p-2.5">
                             <div className="flex items-center justify-between gap-3">
                               <div className="text-sm font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.updatedAt)}</div>
                               <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">{item.status} / {item.confidence}</div>
@@ -903,23 +890,11 @@ export default function StatsPage() {
                       </div>
                     </div>
                   </section>
-                {false && (
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <h3 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
-                  <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {byConfidence.map((bucket) => (
-                      <div key={bucket.key} className="rounded-[1.2rem] bg-[var(--surface-soft)] p-3">
-                        <div className="text-sm font-semibold text-[var(--ink-strong)]">{bucket.key}</div>
-                        <div className="mt-2 text-xs text-[var(--ink-soft)]">WR {formatRate(bucket.winRate)} · Profit {formatUnits(bucket.profitUnits)}</div>
-                        <div className="mt-1 text-xs text-[var(--ink-soft)]">Edge {formatMetric(bucket.avgEdge)} · EV {formatMetric(bucket.avgEv)}</div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-                )}
+              </div>
 
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <h3 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
+              <div className="space-y-3">
+                <section className="glass-panel rounded-[1.6rem] p-3">
+                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
                   <div className="mt-3 space-y-3">
                     {byConfidence.map((bucket) => {
                       const tone = getPerformanceTone(bucket.winRate, bucket.profitUnits, bucket.avgEv);
@@ -954,49 +929,8 @@ export default function StatsPage() {
                   </div>
                 </section>
 
-                {false && (
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <h3 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Rendimiento por Mercado</h3>
-                  <div className="mt-3 space-y-3">
-                    {byMarket.map((bucket) => {
-                      const fill = Math.max(10, Math.min(100, ((bucket.winRate ?? 0) * 100)));
-                      const tone = getPerformanceTone(bucket.winRate, bucket.profitUnits, bucket.avgEv);
-                      const positive = (bucket.profitUnits ?? 0) >= 0;
-
-                      return (
-                        <div key={bucket.key} className="rounded-[1.2rem] border border-[var(--line-soft)] bg-white px-3 py-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
-                                style={marketPillStyle(bucket.key)}
-                              >
-                                {bucket.key}
-                              </span>
-                              <div className="text-sm font-semibold text-[var(--ink-strong)]">
-                                {bucket.total} picks · WR {formatRate(bucket.winRate)}
-                              </div>
-                            </div>
-                            <div className={`text-sm font-semibold ${positive ? 'text-[var(--tone-good)]' : 'text-[var(--tone-bad)]'}`}>
-                              {formatUnits(bucket.profitUnits)}
-                            </div>
-                          </div>
-                          <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
-                            <div className="h-full rounded-full" style={{ ...performanceBarStyle(tone), width: `${fill}%` }} />
-                          </div>
-                          <div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--ink-soft)]">
-                            <span>Edge {formatMetric(bucket.avgEdge)}</span>
-                            <span>EV {formatMetric(bucket.avgEv)}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-                )}
-
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <h3 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Rendimiento por Mercado</h3>
+                <section className="glass-panel rounded-[1.6rem] p-3">
+                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Rendimiento por Mercado</h3>
                   <div className="mt-3 space-y-3">
                     {byMarket.map((bucket) => (
                       <BucketPerformanceBar key={bucket.key} bucket={bucket} />
@@ -1004,8 +938,8 @@ export default function StatsPage() {
                   </div>
                 </section>
 
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <h3 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Backtesting por Edge</h3>
+                <section className="glass-panel rounded-[1.6rem] p-3">
+                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Backtesting por Edge</h3>
                   <div className="mt-3 space-y-3">
                     {byEdgeRange.map((bucket) => (
                       <BucketPerformanceBar key={bucket.key} bucket={bucket} />
@@ -1014,123 +948,8 @@ export default function StatsPage() {
                 </section>
               </div>
 
-              <section className="glass-panel rounded-[1.6rem] p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--ink-muted)]">Recientes</div>
-                    <h3 className="mt-1 font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Del dia elegido</h3>
-                  </div>
-                  <div className="rounded-full border border-[var(--line-soft)] bg-white px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-[var(--ink-soft)]">
-                    {visibleRecentGroup?.list.length ?? recent.length} eventos
-                  </div>
-                </div>
-
-                {!!recentDateOptions.length && (
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {recentDateOptions.map((dateKey) => (
-                      <button
-                        key={dateKey}
-                        type="button"
-                        onClick={() => setSelectedRecentDate(dateKey)}
-                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                          selectedRecentDate === dateKey
-                            ? 'bg-[var(--surface-navy)] text-white'
-                            : 'border border-[var(--line-soft)] bg-white text-[var(--ink-soft)] hover:text-[var(--ink-strong)]'
-                        }`}
-                      >
-                        {formatDateLabel(dateKey)}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <div className="mt-4 space-y-3">
-                  {visibleRecentGroup ? (
-                    <>
-                      <div className="text-sm font-semibold text-[var(--ink-strong)]">
-                        {formatDateLabel(visibleRecentGroup.list[0]?.gameDate ?? visibleRecentGroup.key)}
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                        {visibleRecentGroup.list.map((pick) => (
-                          <div key={pick.id} className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2.5">
-                            <div className="text-sm font-semibold text-[var(--ink-strong)]">{pick.displayTitle}</div>
-                            <div className="mt-1 text-xs text-[var(--ink-soft)]">{pick.gameLabel}</div>
-                            <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">
-                              {pick.market} / {pick.confidence} / {pick.status}
-                            </div>
-                            <div className="mt-1.5 text-xs text-[var(--ink-soft)]">Edge {formatMetric(pick.edge)} / EV {formatMetric(pick.ev)}</div>
-                            <div className="mt-1 text-xs text-[var(--ink-soft)]">{formatUnits(pick.profitUnits)} / {formatDateTime(pick.createdAt)}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="rounded-[1rem] bg-[var(--surface-soft)] px-3 py-3 text-sm text-[var(--ink-soft)]">
-                      No hay picks recientes para la fecha seleccionada.
-                    </div>
-                  )}
-                </div>
-              </section>
             </section>
 
-            {usage && false && (
-            <section className="mt-5 grid gap-4 xl:grid-cols-3">
-              <div className="glass-panel rounded-[1.6rem] p-4">
-                <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--ink-muted)]">DB free plan</div>
-                <div className="mt-2 text-3xl font-semibold text-[var(--ink-strong)]">{usage!.db.estimatedUsedMb.toFixed(3)} MB</div>
-                <div className="mt-1 text-sm text-[var(--ink-soft)]">Libre aprox. {usage!.db.remainingMb.toFixed(3)} MB de {usage!.db.planLimitMb} MB</div>
-                <div className="mt-3 metric-bar-track h-2.5"><div className="metric-bar-fill" style={{ width: `${Math.min(100, usage!.db.percentUsed)}%` }} /></div>
-                <div className="mt-3 grid gap-2 text-xs text-[var(--ink-soft)]">
-                  {usage!.db.breakdown.map((item) => (
-                    <div key={item.key} className="flex items-center justify-between gap-3 rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">
-                      <span>{item.key}</span>
-                      <span>{item.rows} rows · {item.approxMb.toFixed(3)} MB</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="glass-panel rounded-[1.6rem] p-4">
-                <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--ink-muted)]">Odds budget</div>
-                <div className="mt-2 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-3xl font-semibold text-[var(--ink-strong)]">{usage!.odds.monthCount}</div>
-                    <div className="text-sm text-[var(--ink-soft)]">del mes / {usage!.odds.todayCount} hoy</div>
-                  </div>
-                  <div className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${usage!.odds.withinBudget ? 'border border-emerald-200 bg-emerald-50 text-emerald-800' : 'border border-rose-200 bg-rose-50 text-rose-800'}`}>
-                    {usage!.odds.withinBudget ? 'En rango' : 'Ajustar'}
-                  </div>
-                </div>
-                <div className="mt-3 grid gap-2 text-xs text-[var(--ink-soft)]">
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Limite mensual: {usage!.odds.monthlyLimit}</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Restantes: {usage!.odds.remainingMonthCalls} / {usage!.odds.averageCallsLeftPerDay}/dia</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Proyeccion actual: {usage!.odds.projectedMonthCalls}</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Peor caso con cooldown {usage!.odds.cooldownMinutes}m: {usage!.odds.worstCaseAtCooldown}</div>
-                </div>
-                <div className="mt-3 text-xs text-[var(--ink-muted)]">{usage!.odds.note}</div>
-              </div>
-
-              <div className="glass-panel rounded-[1.6rem] p-4">
-                <div className="text-[10px] uppercase tracking-[0.24em] text-[var(--ink-muted)]">Vercel</div>
-                <div className="mt-2 text-3xl font-semibold text-[var(--ink-strong)]">{usage!.vercel.planMode}</div>
-                {usage!.vercel.live && (
-                  <div className="mt-3 rounded-[1rem] border border-[rgba(56,189,248,0.18)] bg-[rgba(56,189,248,0.08)] px-3 py-3 text-xs text-[var(--ink-soft)]">
-                    <div className="font-semibold text-[var(--ink-strong)]">{usage!.vercel.live?.projectName ?? '-'}</div>
-                    <div className="mt-1">Deploys 30d: {usage!.vercel.live?.deployments30d ?? '-'} / Prod listas: {usage!.vercel.live?.readyProductionDeployments30d ?? '-'}</div>
-                    <div className="mt-1">Ultimo deploy: {usage!.vercel.live?.lastDeployment?.state ?? '-'} / {formatDateTime(usage!.vercel.live?.lastDeployment?.createdAt ?? null)}</div>
-                  </div>
-                )}
-                <div className="mt-3 grid gap-2 text-xs text-[var(--ink-soft)]">
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Deploys/dia: {usage!.vercel.hobbyLimits.deploymentsPerDay}</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Function max: {usage!.vercel.hobbyLimits.maxFunctionDurationSeconds}s</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Transferencia: {usage!.vercel.hobbyLimits.fastDataTransferGb} GB</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Logs runtime: {usage!.vercel.hobbyLimits.runtimeLogsHours} h</div>
-                  <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">Archivos estaticos: {usage!.vercel.hobbyLimits.staticFileUploadsMb} MB</div>
-                </div>
-                <div className="mt-3 text-xs text-[var(--ink-muted)]">{usage!.vercel.note}</div>
-              </div>
-            </section>
-            )}
           </>
         )}
       </div>

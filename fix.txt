@@ -1,10 +1,200 @@
-El endpoint no encontró picks porque está usando fecha UTC.
+Haz cambios mínimos, quirúrgicos y seguros. No rompas nada que ya esté funcionando.
 
-Quiero que el filtro de "hoy" NO use toISOString().
+Contexto del proyecto:
+- MLB Picks App con Next.js + Supabase + Vercel.
+- Ya quedó corregido el settlement full game y F5.
+- Ya quedaron correctos los resultados de picks de hoy.
+- El bloque “Del día elegido” ya fue eliminado.
+- El bug del pick sólido activo al terminar el partido YA está reparado o al menos no quiero que lo toques ahora.
+- NO quiero que toques settlement, F5, ni pick sólido en este cambio.
 
-En su lugar:
-- usa created_at::date = CURRENT_DATE (lado DB)
-- o convierte correctamente a timezone local antes de comparar
+LO PENDIENTE A REPARAR AHORA
+1) /stats sigue cargando lentísimo
+2) /picks también sigue lenta
+3) En /stats aparece este error:
+   Failed to sample odds_board_cache: canceling statement due to statement timeout
+4) La card de DB sigue MAL: muestra uso absurdo/inflado y no refleja la realidad
+5) La página /stats NO está compacta ni bien distribuida; al eliminar “Del día elegido”, el layout quedó muy hacia abajo y mal aprovechado
 
-No cambies nada más.
-Solo corrige el filtro de fecha para que detecte correctamente picks de hoy.
+OBJETIVO
+- Dejar /stats y /picks más fluidas
+- Resolver la causa real del timeout y la lentitud
+- Corregir de verdad la card de DB
+- Reorganizar /stats para que quede más compacta, ordenada y premium
+- NO romper nada funcional
+
+==================================================
+A) /STATS: REPARAR LENTITUD REAL
+==================================================
+
+Problema:
+- /stats tarda demasiado en cargar
+- además hay timeout consultando odds_board_cache
+- no quiero solo maquillaje visual; quiero arreglar la causa real
+
+Quiero que audites y corrijas:
+1. Queries pesadas en /stats
+2. Cualquier lectura innecesaria o demasiado amplia de odds_board_cache
+3. Fetches duplicados o secuenciales que podrían paralelizarse
+4. Transformaciones costosas en cliente
+5. Re-renders innecesarios
+6. useEffect duplicados o mal planteados
+7. Cálculos de cards/resúmenes que se recalculen cada render
+
+Sobre odds_board_cache:
+- Encuentra exactamente qué query o muestreo está causando el timeout
+- Reduce costo de esa consulta
+- Si hoy se está trayendo demasiado volumen, limita columnas, filas o rango temporal
+- Si solo se necesita un resumen, no hagas SELECT pesado del cache completo
+- Si conviene, crea una consulta agregada/liviana específica
+- Si la consulta no es imprescindible para el render inicial, sácala del camino crítico
+
+IMPORTANTE:
+- No hagas refactor grande si no hace falta
+- No cambies schema de DB salvo que sea absolutamente necesario
+- Si propones índice SQL, entrégamelo exacto y explica por qué
+- Prioriza arreglar la consulta antes que adornar la UI
+
+==================================================
+B) /PICKS: MEJORAR RENDIMIENTO SIN TOCAR SETTLEMENT
+==================================================
+
+Problema:
+- /picks sigue lenta al cargar
+- no quiero perder el settlement ya corregido
+- tampoco quiero loaders pesados que empeoren rendimiento
+
+Quiero que audites y corrijas:
+1. Fetches duplicados
+2. Render pesado de listas/cards
+3. Transformaciones por render
+4. Estados loading demasiado complejos
+5. Cualquier backfill/autosettle ejecutándose más veces de lo necesario
+6. Cualquier query innecesaria en carga inicial
+
+MUY IMPORTANTE:
+- NO tocar la lógica funcional de settlement ya arreglada
+- Solo optimizar carga y render de /picks
+- Si el backfill corre demasiado agresivo en cada carga, optimízalo de forma segura, sin romper su función
+
+==================================================
+C) LOADERS / UX DE CARGA
+==================================================
+
+No quiero skeletons pesados ni loaders que agreguen mucho DOM.
+
+Quiero:
+- una estrategia de loading ligera y premium
+- preferencia:
+  - progress bar elegante con porcentaje, o
+  - círculo de progreso elegante con porcentaje
+- animación ligera
+- poco costo de render
+
+Aplica esto en:
+- /stats
+- /picks
+
+Si el loader actual empeora rendimiento:
+- simplifícalo
+- no uses demasiados elementos animados
+
+==================================================
+D) CORREGIR DE VERDAD LA CARD DE DB
+==================================================
+
+Problema:
+- La card de DB sigue mostrando uso absurdo/inflado
+- sigue marcando valores incorrectos como si la DB estuviera llena
+- esto ya se intentó reparar, pero sigue mal
+- no quiero estimaciones falsas ni números engañosos
+
+Quiero:
+1. Auditar exactamente de dónde sale el dato de DB usage
+2. Verificar si:
+   - está mezclando unidades (bytes / kB / MB / GB)
+   - está usando una query errónea
+   - está usando una estimación no fiable
+   - está sumando tablas/cache incorrectamente
+   - está leyendo un valor histórico o inflado
+3. Corregirlo de verdad:
+   - si existe dato fiable → mostrarlo correctamente
+   - si NO existe dato fiable → mostrar estado honesto, no inventado
+4. Corregir también:
+   - porcentaje
+   - libre aprox.
+   - barra visual
+
+IMPORTANTE:
+- No quiero fake numbers
+- No quiero una barra roja basada en una cifra mala
+- Si no se puede saber con fiabilidad, muestra algo como “dato no disponible” o una métrica parcial clara y honesta
+
+==================================================
+E) HACER /STATS MÁS COMPACTA Y BIEN ORDENADA
+==================================================
+
+Problema:
+- Al eliminar “Del día elegido”, el layout quedó con demasiado espacio vertical
+- la page sigue muy hacia abajo
+- no está compacta
+- quiero mejor distribución visual y mejor aprovechamiento del espacio
+- debe seguir viéndose premium y clara
+
+Quiero:
+1. Reorganizar el layout de /stats
+2. Hacer la página más compacta
+3. Mejor distribuir cards y bloques
+4. Reducir altura innecesaria
+5. Aprovechar mejor el ancho disponible
+6. Mantener lectura clara y visual premium
+
+Ejemplos de intención:
+- menos scroll innecesario
+- cards más agrupadas
+- métricas clave más arriba y mejor distribuidas
+- secciones más ordenadas y menos “estiradas”
+
+IMPORTANTE:
+- No quitar información útil
+- No reintroducir “Del día elegido”
+- No hacer un rediseño radical
+- Solo compactar y ordenar mejor
+
+==================================================
+F) REGLAS
+==================================================
+
+1. No romper settlement
+2. No romper F5
+3. No tocar pick sólido
+4. No tocar histórico ya corregido
+5. No meter librerías nuevas pesadas
+6. No hacer refactor gigante
+7. Priorizar:
+   - queries
+   - fetches
+   - render
+   - loading liviano
+   - layout más compacto
+8. Si una consulta de stats no es crítica para primer render, diferirla o simplificarla
+9. Mantener estilo premium actual, pero más fluido y más compacto
+
+==================================================
+G) ENTREGABLE FINAL
+==================================================
+
+Cuando termines, dime:
+
+1. Qué archivos tocaste
+2. Qué causaba la lentitud real en /stats
+3. Qué query de odds_board_cache estaba causando el timeout
+4. Qué cambiaste para resolverlo
+5. Si hace falta SQL (índices o cambios puntuales), dámelo exacto
+6. Qué causaba la lentitud en /picks
+7. Qué optimizaste en /picks sin tocar settlement
+8. Qué cambiaste en loaders
+9. Qué causaba que la card de DB siguiera mal
+10. Cómo la corregiste de verdad
+11. Qué cambios hiciste para compactar /stats
+12. Qué pruebas manuales debo hacer después

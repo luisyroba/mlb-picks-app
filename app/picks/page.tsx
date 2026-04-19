@@ -121,32 +121,13 @@ function resolveDefaultDateKey(keys: string[], preferredKey: string) {
   return keys[0] ?? '';
 }
 
-function PicksLoadingSkeleton() {
+function PicksProgressBar() {
   return (
-    <div className="mt-4 space-y-4">
-      <section className="glass-panel rounded-[1.4rem] p-4">
-        <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--surface-soft)]">
-          <div className="h-full w-1/3 animate-[pulse_1.2s_ease-in-out_infinite] rounded-full bg-[var(--surface-navy)]/45" />
-        </div>
-        <div className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--ink-muted)]">Actualizando picks...</div>
-      </section>
-
-      <section className="grid gap-2 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
-        {Array.from({ length: 12 }).map((_, index) => (
-          <div key={`pick-skeleton-${index}`} className="glass-panel rounded-[1rem] p-2">
-            <div className="h-3 w-14 animate-pulse rounded bg-[var(--surface-soft)]" />
-            <div className="mt-2 h-4 w-4/5 animate-pulse rounded bg-[var(--surface-soft)]" />
-            <div className="mt-1 h-3 w-3/5 animate-pulse rounded bg-[var(--surface-soft)]" />
-            <div className="mt-3 grid grid-cols-2 gap-1.5">
-              <div className="h-11 animate-pulse rounded-[0.8rem] bg-[var(--surface-soft)]" />
-              <div className="h-11 animate-pulse rounded-[0.8rem] bg-[var(--surface-soft)]" />
-              <div className="h-11 animate-pulse rounded-[0.8rem] bg-[var(--surface-soft)]" />
-              <div className="h-11 animate-pulse rounded-[0.8rem] bg-[var(--surface-soft)]" />
-            </div>
-            <div className="mt-2 h-8 animate-pulse rounded-[0.8rem] bg-[var(--surface-soft)]" />
-          </div>
-        ))}
-      </section>
+    <div className="mt-4 glass-panel rounded-[1.4rem] p-4">
+      <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--surface-soft)]">
+        <div className="h-full w-2/3 animate-pulse rounded-full bg-[var(--surface-navy)]/50" />
+      </div>
+      <div className="mt-2.5 text-xs uppercase tracking-[0.18em] text-[var(--ink-muted)]">Cargando picks...</div>
     </div>
   );
 }
@@ -295,7 +276,7 @@ export default function PicksPage() {
         </section>
         )}
 
-        {loading && <PicksLoadingSkeleton />}
+        {loading && <PicksProgressBar />}
         {error && <div className="glass-panel mt-4 rounded-[1.4rem] p-4 text-rose-700">{error}</div>}
         {!loading && !error && filtered.length === 0 && (
           <div className="glass-panel mt-4 rounded-[1.4rem] p-5 text-[var(--ink-soft)]">

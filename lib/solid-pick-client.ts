@@ -12,6 +12,8 @@ export type PersistedSolidPick = {
   ev: number | null;
   note?: string | null;
   lockedAt: string;
+  settledStatus?: 'won' | 'lost' | 'void';
+  profitUnits?: number | null;
 };
 
 const STORAGE_PREFIX = 'mlb-solid-pick';

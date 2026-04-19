@@ -543,7 +543,7 @@ function estimateTableBytes(rows: unknown[]): number {
     (total, row) => total + Buffer.byteLength(JSON.stringify(row), 'utf8'),
     0
   );
-  return Math.round(rawBytes * 1.22);
+  return Math.round(rawBytes * 1.3);
 }
 
 function getCounterValue(value: unknown): number {
@@ -603,7 +603,7 @@ async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
     buildSampledTableEstimate({
       table: 'game_snapshots',
       label: 'Game snapshots',
-      sampleColumns: 'id,game_id,snapshot_stage,game_status,start_time,sport,payload,alerts,created_at,updated_at',
+      sampleColumns: 'id,game_id,snapshot_stage,game_status,start_time,sport,alerts,created_at,updated_at',
       orderBy: 'updated_at',
       sampleLimit: 12
     }),
@@ -617,9 +617,9 @@ async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
     buildSampledTableEstimate({
       table: 'odds_board_cache',
       label: 'Odds cache',
-      sampleColumns: 'id,board_key,sport,payload,source,created_at,updated_at',
+      sampleColumns: 'id,board_key,sport,source,created_at,updated_at',
       orderBy: 'updated_at',
-      sampleLimit: 12
+      sampleLimit: 5
     })
   ]);
 
@@ -643,19 +643,20 @@ async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
       rows: item.rows,
       approxMb: roundMb(item.bytes)
     })),
-    note: 'Estimacion basada en conteos reales y una muestra reciente de filas; PostgreSQL real usa algo mas por indices y overhead.'
+    note: 'Estimacion de metadatos por tabla (excluye payloads JSONB). El uso real de PostgreSQL es mayor por indices y overhead del sistema.'
   };
 }
 
 async function buildOddsUsageSummary() {
+  try {
   const now = new Date();
   const dayKey = `ops:odds:daily:${formatUsageDateKey(now)}`;
   const monthKey = `ops:odds:monthly:${formatUsageMonthKey(now)}`;
 
   const [dailyRow, monthlyRow, oddsBoardRow] = await Promise.all([
-    getOddsBoardCache(dayKey),
-    getOddsBoardCache(monthKey),
-    getOddsBoardCache('mlb_main')
+    getOddsBoardCache(dayKey).catch(() => null),
+    getOddsBoardCache(monthKey).catch(() => null),
+    getOddsBoardCache('mlb_main').catch(() => null)
   ]);
 
   const todayCount = getCounterValue((dailyRow?.payload as Record<string, unknown> | null)?.count);
@@ -702,13 +703,29 @@ async function buildOddsUsageSummary() {
     lastExternalRefreshAt: oddsBoardRow?.updated_at ?? null,
     note: 'El contador registra solo refrescos externos reales del board MLB. Las lecturas servidas desde cache no consumen cupo.'
   };
+  } catch {
+    return {
+      todayCount: 0,
+      monthCount: 0,
+      monthlyLimit: ODDS_MONTHLY_LIMIT,
+      remainingMonthCalls: ODDS_MONTHLY_LIMIT,
+      averageCallsLeftPerDay: 0,
+      projectedMonthCalls: 0,
+      worstCaseAtCooldown: 0,
+      withinBudget: true,
+      cooldownMinutes: ODDS_REFRESH_COOLDOWN_MINUTES,
+      lastExternalRefreshAt: null,
+      note: 'No se pudo leer historial de odds (timeout DB).'
+    };
+  }
 }
 
 export async function GET() {
   try {
-    await withTimeout(autoSettlePendingPicks(), 7000, undefined);
-
-    const confirmedPicks = await listConfirmedPicks();
+    const [, confirmedPicks] = await Promise.all([
+      withTimeout(autoSettlePendingPicks(), 4000, undefined),
+      listConfirmedPicks()
+    ]);
     const allPicks = confirmedPicks;
     const recentPicks = [...confirmedPicks].sort((left, right) => {
       const leftMs = new Date(String(left.created_at ?? left.updated_at ?? '')).getTime();
@@ -880,9 +897,17 @@ export async function GET() {
           edgeBandOrder.indexOf(left.key) - edgeBandOrder.indexOf(right.key)
       );
 
+    const STORAGE_TIMEOUT_FALLBACK = {
+      estimatedUsedMb: 0,
+      remainingMb: SUPABASE_FREE_DB_LIMIT_MB,
+      percentUsed: 0,
+      breakdown: [] as StorageBreakdown[],
+      note: 'No se pudo estimar el uso de DB (timeout). Reintenta mas tarde.'
+    };
+
     const roi = gradedCount > 0 ? totalProfitUnits / gradedCount : null;
-    const [storage, oddsUsage, vercelUsage] = await Promise.all([
-      buildStorageEstimate(allPicks as Array<Record<string, unknown>>),
+    const [storage, oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
+      withTimeout(buildStorageEstimate(allPicks as Array<Record<string, unknown>>), 6000, STORAGE_TIMEOUT_FALLBACK),
       buildOddsUsageSummary(),
       withTimeout(buildVercelBudgetSummary(), 5000, {
         liveUsageAvailable: false,
@@ -897,19 +922,13 @@ export async function GET() {
         },
         note: 'No pude leer stats live de Vercel a tiempo. Se muestran guardrails estáticos.',
         live: null
-      })
-    ]);
-    let snapshotsById = new Map();
-
-    try {
-      snapshotsById = await getPregameSnapshotsByIds(
+      }),
+      getPregameSnapshotsByIds(
         recentPicks
           .map((pick) => pick.snapshot_id ?? '')
           .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
-      );
-    } catch {
-      snapshotsById = new Map();
-    }
+      ).catch(() => new Map())
+    ]);
     const recentWithSnapshots = recentPicks.map((pick) => {
       const snapshot = pick.snapshot_id ? snapshotsById.get(pick.snapshot_id) ?? null : null;
       const snapshotPayload =
