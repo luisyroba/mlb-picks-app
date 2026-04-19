@@ -1012,3 +1012,67 @@ export async function autoSettleRecentBackfill(options?: {
 
   return settled;
 }
+
+export async function recalculateTodayF5Picks(options?: {
+  limit?: number;
+}): Promise<{ reverted: PickRow[]; resettled: PickRow[] }> {
+  const limit = Math.max(10, Math.min(200, options?.limit ?? 100));
+  function localDateStr(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  const todayLocal = localDateStr(new Date());
+
+  const settled = await listPicks({
+    statuses: ['won', 'lost', 'void'],
+    includeUnconfirmed: true,
+    orderBy: 'updated_at',
+    ascending: false,
+    limit
+  });
+
+  const f5Candidates = settled.filter((pick) => {
+    if (!String(pick.result ?? '').toUpperCase().startsWith('AUTO_')) return false;
+    const pickDate = localDateStr(new Date(pick.updated_at || ''));
+    if (pickDate !== todayLocal) return false;
+    return normalizeResolvedMarket(String(pick.execution_market || pick.market || '')) === 'F5';
+  });
+
+  if (!f5Candidates.length) {
+    return { reverted: [], resettled: [] };
+  }
+
+  const reverted: PickRow[] = [];
+
+  for (const pick of f5Candidates) {
+    try {
+      const row = await settlePickRecord({
+        pickId: pick.id,
+        status: 'pending',
+        result: null,
+        profitUnits: null
+      });
+      reverted.push(row);
+      console.info(`recalculate-f5: reverted ${pick.id} (${pick.game_id}) was ${pick.status} ${pick.result}`);
+    } catch {
+      console.warn(`recalculate-f5: failed to revert ${pick.id}`);
+    }
+  }
+
+  const resettled: PickRow[] = [];
+
+  for (const pick of reverted) {
+    try {
+      const result = await autoSettlePick(pick);
+      if (result) {
+        resettled.push(result);
+        console.info(`recalculate-f5: resettled ${pick.id} → ${result.status} ${result.result}`);
+      } else {
+        console.info(`recalculate-f5: ${pick.id} left pending (f5 not yet closed or missing data)`);
+      }
+    } catch {
+      console.warn(`recalculate-f5: failed to resettle ${pick.id}`);
+    }
+  }
+
+  return { reverted, resettled };
+}
