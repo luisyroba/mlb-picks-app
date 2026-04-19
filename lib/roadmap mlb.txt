@@ -1,0 +1,361 @@
+{
+  "project": {
+    "name": "mlb-picks-app",
+    "goal": "Aplicación web privada para analizar juegos MLB y elegir un solo pick por juego con el mejor equilibrio entre probabilidad real, edge, EV y cuota utilizable.",
+    "scope_v1": {
+      "sports": ["MLB"],
+      "markets": ["ML", "RL", "TOTAL", "F5"],
+      "one_pick_per_game": true,
+      "private_use_only": true,
+      "cross_device": true,
+      "free_stack_only": true
+    },
+    "stack": {
+      "editor": "VS Code",
+      "ai_in_editor": "GitHub Copilot Free",
+      "secondary_ai": "Claude via Perplexity",
+      "frontend_backend": "Next.js + TypeScript",
+      "database": "Supabase Free (Postgres)",
+      "hosting": "Vercel Hobby",
+      "data_source_primary": "ESPN API",
+      "local_dev": "Node.js"
+    }
+  },
+  "architecture": {
+    "principle": "Separar análisis del partido de la decisión del mercado",
+    "layers": {
+      "layer_a": {
+        "name": "Pregame Analysis",
+        "purpose": "Analizar el partido sin contaminarlo con la cuota real del usuario",
+        "inputs": [
+          "team stats",
+          "record",
+          "position",
+          "runs scored",
+          "runs allowed",
+          "run differential",
+          "starter data",
+          "bullpen data",
+          "lineup context",
+          "park/weather",
+          "market context light"
+        ],
+        "outputs": [
+          "pregameScore",
+          "advantageSide",
+          "scoringProjection",
+          "starterEdge",
+          "bullpenEdge",
+          "f5Viable",
+          "marketHints"
+        ]
+      },
+      "layer_b": {
+        "name": "Market Selection",
+        "purpose": "Elegir el mejor mercado entre ML, RL, TOTAL y F5 usando score, contexto y cuota",
+        "inputs": [
+          "layerA outputs",
+          "real user odds",
+          "available lines"
+        ],
+        "outputs": [
+          "confirmedPick",
+          "selectedMarket",
+          "selectedLine",
+          "selectedOdds",
+          "estimatedProbability",
+          "impliedProbability",
+          "edge",
+          "ev",
+          "executionReason",
+          "passReason"
+        ]
+      }
+    }
+  },
+  "market_rules": {
+    "ml": "Usar cuando hay ventaja clara y la cuota aún es utilizable.",
+    "rl": "Usar cuando la ventaja es fuerte pero el ML está demasiado caro/barato para el retorno.",
+    "total": "Usar cuando el script del juego y park/weather apuntan claramente a over o under.",
+    "f5": "Usar cuando el starter edge es fuerte y el bullpen introduce demasiado riesgo para full game.",
+    "pass": "Usar cuando el edge no compensa el precio o el análisis no es lo suficientemente sólido."
+  },
+  "analysis_blocks": {
+    "starter": {
+      "description": "Ventaja del abridor del día",
+      "examples": [
+        "ERA",
+        "FIP",
+        "xFIP",
+        "WHIP",
+        "K rate",
+        "innings proyectados",
+        "matchup vs lineup rival",
+        "handedness splits"
+      ]
+    },
+    "bullpen": {
+      "description": "Calidad y disponibilidad real del bullpen",
+      "examples": [
+        "ERA bullpen",
+        "FIP bullpen",
+        "uso reciente",
+        "closer disponible",
+        "fatiga últimos 2-3 días"
+      ]
+    },
+    "offense": {
+      "description": "Producción ofensiva del equipo sin duplicar variables de bajas",
+      "examples": [
+        "runs scored",
+        "OPS/wRC+ si existe",
+        "splits vs handedness",
+        "producción reciente",
+        "consistencia ofensiva"
+      ]
+    },
+    "park_weather": {
+      "description": "Impacto del estadio y clima, especialmente importante para totals",
+      "examples": [
+        "park factor runs",
+        "park factor HR",
+        "temperatura",
+        "viento",
+        "riesgo de lluvia"
+      ]
+    },
+    "team_strength": {
+      "description": "Contexto general del equipo",
+      "examples": [
+        "record",
+        "position",
+        "ultimos 10",
+        "racha",
+        "run differential",
+        "home/away"
+      ],
+      "special_rule": "Reducir impacto si starterEdge es extremadamente fuerte para no matar underdogs buenos con ace"
+    },
+    "lineup_context": {
+      "description": "Contexto de titulares y ausencias, sin duplicar offense",
+      "examples": [
+        "titulares confirmados",
+        "ausencias importantes",
+        "descanso",
+        "lineup esperado vs confirmado"
+      ]
+    },
+    "market_context_light": {
+      "description": "Señal ligera de mercado, nunca dominante",
+      "examples": [
+        "line movement",
+        "ticket splits",
+        "sharp money signal ligera"
+      ],
+      "important_note": "No incluye cuota real del usuario"
+    }
+  },
+  "weights": {
+    "full_game_side": {
+      "starter": 28,
+      "bullpen": 16,
+      "offense": 18,
+      "park_weather": 10,
+      "team_strength": 10,
+      "lineup_context": 10,
+      "market_context_light": 8
+    },
+    "f5_side": {
+      "starter": 40,
+      "offense": 22,
+      "park_weather": 10,
+      "bullpen": 8,
+      "team_strength": 8,
+      "lineup_context": 8,
+      "market_context_light": 4
+    },
+    "total_market": {
+      "park_weather": 22,
+      "starter": 22,
+      "offense": 20,
+      "bullpen": 18,
+      "team_strength": 8,
+      "lineup_context": 6,
+      "market_context_light": 4
+    }
+  },
+  "weight_rules": {
+    "default_profile_before_market_selection": "full_game_side",
+    "recalculate_after_market_candidate": true,
+    "recalculate_max_times": 1,
+    "avoid_infinite_loop": true,
+    "offense_and_lineup_context_must_not_duplicate_variables": true
+  },
+  "decision_flow": [
+    "1. Extraer y normalizar datos ESPN",
+    "2. Calcular score por bloque",
+    "3. Aplicar pesos full_game_side y generar pregameScore inicial",
+    "4. Generar script del juego",
+    "5. Evaluar mercados candidatos ML, RL, TOTAL, F5",
+    "6. Elegir mercado candidato",
+    "7. Recalcular pregameScore con pesos específicos del mercado candidato",
+    "8. Confirmar pick o declarar PASS",
+    "9. Guardar pick, alternativas y métricas"
+  ],
+  "game_script_outputs": {
+    "advantage_side": [
+      "strong_home",
+      "lean_home",
+      "neutral",
+      "lean_away",
+      "strong_away"
+    ],
+    "scoring_projection": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "starter_edge": [
+      "strong_home",
+      "lean_home",
+      "neutral",
+      "lean_away",
+      "strong_away"
+    ],
+    "bullpen_edge": [
+      "strong_home",
+      "lean_home",
+      "neutral",
+      "lean_away",
+      "strong_away"
+    ],
+    "f5_viable": [true, false]
+  },
+  "database": {
+    "tables": {
+      "games": {
+        "purpose": "Guardar partido base"
+      },
+      "game_snapshots": {
+        "purpose": "Guardar payload o snapshot del análisis pregame"
+      },
+      "picks": {
+        "purpose": "Guardar pick final, odds, edge, EV, resultado y alternativas"
+      }
+    },
+    "picks_fields_minimum": [
+      "id",
+      "game_id",
+      "sport",
+      "market",
+      "line",
+      "selection",
+      "odds",
+      "confidence",
+      "estimated_probability",
+      "implied_probability",
+      "edge",
+      "ev",
+      "reason",
+      "alt_market_1",
+      "alt_market_2",
+      "status",
+      "result",
+      "profit_units",
+      "created_at"
+    ]
+  },
+  "project_structure": {
+    "app": [
+      "page.tsx",
+      "games/page.tsx",
+      "game/[id]/page.tsx",
+      "picks/page.tsx",
+      "stats/page.tsx",
+      "api/games/route.ts",
+      "api/analyze/route.ts",
+      "api/save-pick/route.ts",
+      "api/settle-pick/route.ts"
+    ],
+    "lib": [
+      "types.ts",
+      "weights.ts",
+      "score-blocks.ts",
+      "score-game.ts",
+      "project-game-script.ts",
+      "evaluate-markets.ts",
+      "choose-best-pick.ts",
+      "espn.ts",
+      "db.ts"
+    ],
+    "components": [
+      "GameCard.tsx",
+      "PickCard.tsx",
+      "StatsCard.tsx"
+    ]
+  },
+  "typescript_files_first": {
+    "first": "lib/types.ts",
+    "second": "lib/weights.ts",
+    "third": "lib/score-blocks.ts",
+    "fourth": "lib/score-game.ts",
+    "fifth": "lib/project-game-script.ts",
+    "sixth": "lib/evaluate-markets.ts",
+    "seventh": "lib/choose-best-pick.ts"
+  },
+  "roadmap": {
+    "phase_1_foundation": [
+      "Crear proyecto Next.js con TypeScript",
+      "Subir repo a GitHub",
+      "Configurar Vercel",
+      "Crear proyecto Supabase"
+    ],
+    "phase_2_domain_model": [
+      "Definir tipos TypeScript",
+      "Definir perfiles de pesos",
+      "Definir interfaces de input ESPN normalizado",
+      "Definir outputs de Capa A y Capa B"
+    ],
+    "phase_3_scoring_engine": [
+      "Crear score por bloque",
+      "Crear score compuesto",
+      "Generar game script",
+      "Implementar selector preliminar de mercado",
+      "Recalcular score con perfil específico"
+    ],
+    "phase_4_ui": [
+      "Pantalla games",
+      "Pantalla game detail",
+      "Pantalla picks",
+      "Pantalla stats"
+    ],
+    "phase_5_persistence": [
+      "Guardar games",
+      "Guardar snapshots",
+      "Guardar picks",
+      "Guardar settlement manual o semiautomático"
+    ],
+    "phase_6_iteration": [
+      "Ajustar pesos",
+      "Ajustar umbrales de edge",
+      "Comparar picks ganadores/perdedores",
+      "Refinar reglas ML vs RL vs TOTAL vs F5"
+    ]
+  },
+  "anti_chaos_rules": [
+    "No mezclar UI con lógica de scoring",
+    "No meter cuota del usuario en Capa A",
+    "No duplicar variables entre offense y lineup_context",
+    "No hacer una sola función gigante",
+    "No recalcular mercado indefinidamente",
+    "Guardar siempre alternativas descartadas para auditoría",
+    "Un solo pick final por juego"
+  ],
+  "next_step_now": {
+    "task": "Crear los archivos base del motor",
+    "start_with": [
+      "lib/types.ts",
+      "lib/weights.ts"
+    ]
+  }
+}

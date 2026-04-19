@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+:root {
+  --app-bg: #f4f2ec;
+  --surface: #fffdfa;
+  --surface-strong: #ffffff;
+  --surface-navy: #081a35;
+  --surface-soft: #ebe7dc;
+  --line-soft: rgba(8, 26, 53, 0.08);
+  --line-strong: rgba(8, 26, 53, 0.16);
+  --ink-strong: #081a35;
+  --ink-soft: rgba(8, 26, 53, 0.74);
+  --ink-muted: rgba(8, 26, 53, 0.54);
+  --accent-blue: #38bdf8;
+  --accent-red: #f43f5e;
+  --accent-amber: #f59e0b;
+  --accent-mint: #22c55e;
+  --tone-good: color-mix(in oklch, var(--accent-mint) 88%, black 8%);
+  --tone-mid: color-mix(in oklch, var(--accent-amber) 84%, black 10%);
+  --tone-bad: color-mix(in oklch, var(--accent-red) 86%, black 8%);
+  --tone-good-soft: color-mix(in oklch, var(--tone-good) 16%, transparent);
+  --tone-mid-soft: color-mix(in oklch, var(--tone-mid) 16%, transparent);
+  --tone-bad-soft: color-mix(in oklch, var(--tone-bad) 16%, transparent);
+  --pill-ml-border: color-mix(in oklch, var(--accent-blue) 26%, white);
+  --pill-ml-from: color-mix(in oklch, var(--accent-blue) 12%, white);
+  --pill-ml-to: color-mix(in oklch, var(--accent-blue) 26%, white);
+  --pill-ml-text: color-mix(in oklch, var(--surface-navy) 82%, var(--accent-blue) 18%);
+  --pill-rl-border: color-mix(in oklch, #c084fc 28%, white);
+  --pill-rl-from: color-mix(in oklch, #c084fc 12%, white);
+  --pill-rl-to: color-mix(in oklch, #a855f7 18%, white);
+  --pill-rl-text: color-mix(in oklch, var(--surface-navy) 70%, #7c3aed 30%);
+  --pill-total-border: color-mix(in oklch, #2dd4bf 30%, white);
+  --pill-total-from: color-mix(in oklch, #2dd4bf 12%, white);
+  --pill-total-to: color-mix(in oklch, #0f766e 10%, white);
+  --pill-total-text: color-mix(in oklch, var(--surface-navy) 68%, #0f766e 32%);
+  --pill-f5-border: color-mix(in oklch, var(--accent-amber) 32%, white);
+  --pill-f5-from: color-mix(in oklch, var(--accent-amber) 14%, white);
+  --pill-f5-to: color-mix(in oklch, var(--accent-amber) 24%, white);
+  --pill-f5-text: color-mix(in oklch, var(--surface-navy) 72%, var(--accent-amber) 28%);
+  --focus-ring: color-mix(in oklch, var(--accent-blue) 36%, white);
+  --body-wash: color-mix(in oklch, white 50%, transparent);
+  --body-blue-glow: color-mix(in oklch, var(--accent-blue) 9%, transparent);
+  --body-red-glow: color-mix(in oklch, var(--accent-red) 8%, transparent);
+}
+
+@theme inline {
+  --color-background: var(--app-bg);
+  --color-foreground: var(--ink-strong);
+  --font-sans: var(--font-body);
+  --font-serif: var(--font-body);
+  --font-mono: "Consolas", "SFMono-Regular", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  background:
+    linear-gradient(180deg, var(--body-wash), transparent 20%),
+    radial-gradient(circle at top center, var(--body-blue-glow), transparent 30%),
+    radial-gradient(circle at 80% 8%, var(--body-red-glow), transparent 24%),
+    var(--app-bg);
+  color: var(--ink-strong);
+  font-family: var(--font-body), Georgia, serif;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.font-heading {
+  font-family: var(--font-heading), system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+p,
+span,
+td,
+th,
+label,
+input,
+button,
+textarea,
+select,
+.font-body {
+  font-family: var(--font-body), Georgia, serif;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.glass-panel {
+  background: linear-gradient(180deg, rgba(255,255,255,0.86), rgba(255,255,255,0.7));
+  border: 1px solid var(--line-soft);
+  box-shadow: 0 20px 60px rgba(9, 28, 57, 0.08);
+  backdrop-filter: blur(18px);
+}
+
+.navy-panel {
+  background:
+    linear-gradient(160deg, rgba(10, 29, 58, 0.97), rgba(9, 28, 57, 0.9)),
+    var(--surface-navy);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 22px 60px rgba(9, 28, 57, 0.24);
+}
+
+.metric-bar-track {
+  background: rgba(9, 28, 57, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.metric-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(in oklch 90deg, var(--accent-blue), var(--accent-red));
+}
+
+.score-grid {
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.06) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
