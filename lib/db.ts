@@ -832,6 +832,41 @@ export async function getOddsBoardCache(
   return assertSingleRow<OddsBoardCacheRow>(data, 'odds board cache');
 }
 
+export async function getPremiumDailyLock(
+  dateKey: string
+): Promise<Record<string, unknown> | null> {
+  const row = await getOddsBoardCache(`premium-lock:${dateKey}`).catch(() => null);
+  return (row?.payload as Record<string, unknown> | null) ?? null;
+}
+
+export async function createPremiumDailyLock(
+  dateKey: string,
+  payload: Record<string, unknown>
+): Promise<{ created: boolean; payload: Record<string, unknown> }> {
+  const boardKey = `premium-lock:${dateKey}`;
+  const { error } = await supabase
+    .from('odds_board_cache')
+    .insert({
+      board_key: boardKey,
+      sport: 'MLB',
+      payload,
+      source: 'premium-lock',
+      updated_at: new Date().toISOString()
+    });
+
+  if (error) {
+    const isDuplicate =
+      error.code === '23505' ||
+      error.message?.toLowerCase().includes('duplicate') ||
+      error.message?.toLowerCase().includes('unique');
+    if (!isDuplicate) throw new Error(`Failed to create premium lock: ${error.message}`);
+    // First write already won — read and return the existing record
+    const existing = await getOddsBoardCache(boardKey).catch(() => null);
+    return { created: false, payload: (existing?.payload as Record<string, unknown>) ?? payload };
+  }
+  return { created: true, payload };
+}
+
 export async function listOddsBoardCachesByPrefix(
   prefix: string
 ): Promise<OddsBoardCacheRow[]> {

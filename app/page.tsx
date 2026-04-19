@@ -1951,7 +1951,7 @@ export default function HomePage() {
   const solidDailyCandidates = useMemo(() => {
     const sourceGames = todayGamesCache.length ? todayGamesCache : dayOffset === 0 ? games : [];
 
-    return sourceGames
+    const sorted = sourceGames
       .flatMap((game) => {
         if (!game.analysis.hasActivePick || game.analysis.status !== 'pending' || game.analysis.confidence !== 'A') {
           return [];
@@ -1993,6 +1993,14 @@ export default function HomePage() {
         }];
       })
       .sort((left, right) => right.score - left.score || (right.edge ?? 0) - (left.edge ?? 0) || (right.ev ?? 0) - (left.ev ?? 0));
+
+    console.log('[premium-audit] totalCandidates', sorted.length);
+    sorted.forEach((c, i) => console.log(`[premium-audit] candidate #${i + 1}`, {
+      gameId: c.gameId, matchup: c.gameLabel, marketType: c.market,
+      selection: c.selection, tier: c.confidence, score: c.score,
+      edge: c.edge, ev: c.ev, odds: c.odds
+    }));
+    return sorted;
   }, [analysisByGame, dayOffset, games, solidStorageDateKey, todayGamesCache]);
 
   useEffect(() => {

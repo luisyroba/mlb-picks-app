@@ -36,6 +36,8 @@ type RecentItem = {
   selection: string;
   confidence: string;
   status: string;
+  score: number | null;
+  executionOdds: number | null;
   edge: number | null;
   ev: number | null;
   profitUnits: number | null;
@@ -59,6 +61,7 @@ type TrendPoint = {
 type SolidPickHistoryItem = {
   date: string;
   gameId: string;
+  gameLabel: string;
   market: string;
   selection: string;
   confidence: string;
@@ -108,6 +111,51 @@ type StatsResponse = {
       currentStreak: { type: 'won' | 'lost'; count: number } | null;
     };
     history: SolidPickHistoryItem[];
+    todayRanking?: {
+      gameId: string;
+      gameLabel: string;
+      market: string;
+      selection: string;
+      confidence: string;
+      score: number;
+      edge: number | null;
+      ev: number | null;
+      estimatedProbability: number | null;
+      impliedProbability: number | null;
+      executionOdds: number | null;
+      gameStartTime: string | null;
+      prevScore: number | null;
+      prevEdge: number | null;
+      prevEv: number | null;
+      prevEstimatedProbability: number | null;
+      prevImpliedProbability: number | null;
+      prevExecutionOdds: number | null;
+    }[];
+    premiumPick?: {
+      gameId: string;
+      gameLabel: string;
+      market: string;
+      selection: string;
+      confidence: string;
+      score: number;
+      edge: number | null;
+      ev: number | null;
+      executionOdds: number | null;
+      lockedAt?: string;
+      lockReason?: string;
+    } | null;
+    isLocked?: boolean;
+    betterPickPostLock?: boolean;
+    betterPick?: {
+      gameId: string;
+      gameLabel: string;
+      market: string;
+      selection: string;
+      score: number;
+      edge: number | null;
+      ev: number | null;
+      executionOdds: number | null;
+    } | null;
   };
   usage?: {
     db: {
@@ -228,12 +276,6 @@ function formatOdds(value?: number | null) {
   return value.toFixed(2);
 }
 
-function formatPickLine(selection: string, line?: number | null, market?: string | null) {
-  if (typeof line !== 'number' || !Number.isFinite(line)) return selection;
-  const normalized = selection.trim().toLowerCase();
-  const isTotal = market === 'TOTAL' || normalized.startsWith('over') || normalized.startsWith('under');
-  return `${selection} ${isTotal ? Math.abs(line).toFixed(1) : `${line > 0 ? '+' : ''}${line.toFixed(1)}`}`;
-}
 
 function formatStreak(streak?: { type: 'won' | 'lost'; count: number } | null) {
   if (!streak) return '-';
@@ -684,19 +726,10 @@ export default function StatsPage() {
     () => solidPick.history.reduce((sum, item) => sum + (item.profitUnits ?? 0), 0),
     [solidPick.history]
   );
-  const todayTopPicks = useMemo(() => {
-    const today = getTodayDateKey();
-    const solidGameId = solidPick.today?.gameId ?? activeSolidPick?.gameId;
-    return (stats?.recent ?? [])
-      .filter((item) => {
-        const dateStr = item.gameDate ?? item.createdAt ?? '';
-        const normalizedDate = dateStr.slice(0, 10).replace(/-/g, '');
-        const normalizedToday = today.replace(/-/g, '');
-        return normalizedDate === normalizedToday && item.gameId !== solidGameId;
-      })
-      .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))
-      .slice(0, 2);
-  }, [stats?.recent, solidPick.today?.gameId, activeSolidPick?.gameId]);
+  const todayTopPicks = useMemo(
+    () => stats?.solidPick?.todayRanking?.slice(0, 3) ?? [],
+    [stats?.solidPick?.todayRanking]
+  );
 
   useEffect(() => {
     setSolidHistoryVisibleCount(SOLID_HISTORY_PAGE_SIZE);
@@ -796,48 +829,58 @@ export default function StatsPage() {
 
                   {/* Pick de hoy */}
                   <div className="mt-3 rounded-[1.1rem] border border-[#ead18f] bg-[linear-gradient(135deg,rgba(255,248,224,0.92),rgba(255,255,255,0.9))] p-3">
-                    <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Pick sólido de hoy</div>
-                    <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">
-                      {activeSolidPick
-                        ? `${activeSolidPick.market} / ${formatPickLine(activeSolidPick.selection, activeSolidPick.line, activeSolidPick.market)}`
-                        : 'Sin pick sólido activo hoy'}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Pick sólido de hoy</div>
+                      {stats?.solidPick?.isLocked && (
+                        <span className="rounded-full border border-[#ead18f]/70 bg-[rgba(255,248,224,0.9)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8a6115]">Lock</span>
+                      )}
                     </div>
-                    {activeSolidPick ? (
-                      <>
-                        <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{activeSolidPick.gameLabel} · {activeSolidPick.confidence}</div>
-                        <div className="mt-2 grid grid-cols-4 gap-1.5">
-                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Cuota</div>
-                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatOdds(activeSolidPick.odds)}</div>
+                    {stats?.solidPick?.premiumPick ? (() => {
+                      const pp = stats.solidPick!.premiumPick!;
+                      const settlementInfo = activeSolidPick?.gameId === pp.gameId ? activeSolidPick : null;
+                      return (
+                        <>
+                          <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">
+                            {pp.market} / {pp.selection}
                           </div>
-                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Score</div>
-                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.score)}</div>
-                          </div>
-                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Edge</div>
-                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.edge)}</div>
-                          </div>
-                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Estado</div>
-                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">
-                              {activeSolidPick.settledStatus?.toUpperCase() ?? 'PENDING'}
+                          <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{pp.gameLabel} · {pp.confidence}</div>
+                          <div className="mt-2 grid grid-cols-4 gap-1.5">
+                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Cuota</div>
+                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatOdds(pp.executionOdds)}</div>
                             </div>
-                            {activeSolidPick.settledStatus && typeof activeSolidPick.profitUnits === 'number' && (
-                              <div className="text-[10px] text-[var(--ink-soft)]">{formatUnits(activeSolidPick.profitUnits)}</div>
-                            )}
+                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Score</div>
+                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(pp.score)}</div>
+                            </div>
+                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Edge</div>
+                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(pp.edge)}</div>
+                            </div>
+                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Estado</div>
+                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">
+                                {settlementInfo?.settledStatus?.toUpperCase() ?? 'PENDING'}
+                              </div>
+                              {settlementInfo?.settledStatus && typeof settlementInfo.profitUnits === 'number' && (
+                                <div className="text-[10px] text-[var(--ink-soft)]">{formatUnits(settlementInfo.profitUnits)}</div>
+                              )}
+                            </div>
                           </div>
+                          {activeSolidPick?.note && (
+                            <div className="mt-2 rounded-[0.8rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-2.5 py-1.5 text-[11px] text-[#6d5220]">
+                              {activeSolidPick.note}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })() : (
+                      <>
+                        <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">Sin pick sólido activo hoy</div>
+                        <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
+                          Se mostrará aquí cuando el slate de hoy deje un pick premium activo.
                         </div>
-                        {activeSolidPick.note && (
-                          <div className="mt-2 rounded-[0.8rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-2.5 py-1.5 text-[11px] text-[#6d5220]">
-                            {activeSolidPick.note}
-                          </div>
-                        )}
                       </>
-                    ) : (
-                      <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
-                        Se mostrará aquí cuando el slate de hoy deje un pick premium activo.
-                      </div>
                     )}
                   </div>
 
@@ -871,30 +914,28 @@ export default function StatsPage() {
 
                     {/* Panel: Top score */}
                     {!solidHistoryOpen && (() => {
-                      const topItems = [
-                        ...(solidPick.today ? [{
-                          rank: 1,
-                          market: solidPick.today.market,
-                          selection: solidPick.today.selection,
-                          gameLabel: activeSolidPick?.gameLabel ?? null,
-                          score: solidPick.today.score as number | null,
-                          odds: solidPick.today.executionOdds ?? null,
-                          edge: solidPick.today.edge ?? null,
-                          ev: solidPick.today.ev ?? null,
-                          chosen: true,
-                        }] : []),
-                        ...todayTopPicks.map((item, idx) => ({
-                          rank: idx + 2,
-                          market: item.market,
-                          selection: item.selection,
-                          gameLabel: item.gameLabel ?? null,
-                          score: null as number | null,
-                          odds: null as number | null,
-                          edge: item.edge ?? null,
-                          ev: item.ev ?? null,
-                          chosen: false,
-                        })),
-                      ];
+                      const solidGameId = stats?.solidPick?.premiumPick?.gameId ?? solidPick.today?.gameId ?? activeSolidPick?.gameId;
+                      const betterPostLock = stats?.solidPick?.betterPickPostLock;
+                      const betterPickData = stats?.solidPick?.betterPick;
+                      const topItems = todayTopPicks.map((item, idx) => ({
+                        rank: idx + 1,
+                        market: item.market,
+                        selection: item.selection,
+                        gameLabel: item.gameLabel,
+                        score: item.score,
+                        odds: item.executionOdds ?? null,
+                        edge: item.edge ?? null,
+                        ev: item.ev ?? null,
+                        estimatedProbability: item.estimatedProbability ?? null,
+                        impliedProbability: item.impliedProbability ?? null,
+                        prevScore: item.prevScore ?? null,
+                        prevOdds: item.prevExecutionOdds ?? null,
+                        prevEdge: item.prevEdge ?? null,
+                        prevEv: item.prevEv ?? null,
+                        prevEstimatedProbability: item.prevEstimatedProbability ?? null,
+                        prevImpliedProbability: item.prevImpliedProbability ?? null,
+                        chosen: item.gameId === solidGameId,
+                      }));
 
                       if (!topItems.length) {
                         return <div className="py-2 text-[11px] text-[var(--ink-soft)]">Sin candidatos para hoy</div>;
@@ -902,6 +943,15 @@ export default function StatsPage() {
 
                       return (
                         <div className="space-y-1.5">
+                          {betterPostLock && betterPickData && (
+                            <div className="rounded-[0.8rem] border border-[#ead18f]/50 bg-[rgba(255,248,224,0.6)] px-2.5 py-1.5">
+                              <div className="text-[9px] uppercase tracking-[0.14em] text-[#9b771c]">Mejor pick post-lock detectado</div>
+                              <div className="mt-0.5 text-[11px] font-semibold text-[var(--ink-strong)]">
+                                {betterPickData.market} · {betterPickData.selection} · Score {formatMetric(betterPickData.score)}
+                              </div>
+                              <div className="text-[10px] text-[#8a6115]">{betterPickData.gameLabel}</div>
+                            </div>
+                          )}
                           {topItems.map((pick) => (
                             <div
                               key={pick.rank}
@@ -917,12 +967,33 @@ export default function StatsPage() {
                                 </span>
                                 <span className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{pick.selection}</span>
                               </div>
-                              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0 pl-6 text-[10px] text-[var(--ink-soft)]">
-                                {pick.gameLabel && <span className="text-[var(--ink-muted)]">{pick.gameLabel}</span>}
-                                {pick.score !== null && <span>Score {formatMetric(pick.score)}</span>}
-                                {pick.odds !== null && <span>@ {formatOdds(pick.odds)}</span>}
-                                {pick.edge !== null && <span>Edge {formatMetric(pick.edge)}</span>}
-                                {pick.ev !== null && <span>EV {formatMetric(pick.ev)}</span>}
+                              {pick.gameLabel && (
+                                <div className="mt-0.5 pl-6 text-[10px] text-[var(--ink-muted)]">{pick.gameLabel}</div>
+                              )}
+                              <div className="mt-1.5 grid grid-cols-3 gap-1 pl-6">
+                                {(() => {
+                                  const metrics: Array<{ label: string; cur: number | null; prev: number | null; fmt: (v?: number | null) => string; inv?: boolean }> = [
+                                    { label: 'Score', cur: pick.score, prev: pick.prevScore, fmt: formatMetric },
+                                    { label: 'Prob', cur: pick.estimatedProbability, prev: pick.prevEstimatedProbability, fmt: formatRate },
+                                    { label: 'Impl', cur: pick.impliedProbability, prev: pick.prevImpliedProbability, fmt: formatRate, inv: true },
+                                    { label: 'Edge', cur: pick.edge, prev: pick.prevEdge, fmt: formatMetric },
+                                    { label: 'EV', cur: pick.ev, prev: pick.prevEv, fmt: formatMetric },
+                                    { label: 'Odds', cur: pick.odds, prev: pick.prevOdds, fmt: formatOdds, inv: true },
+                                  ];
+                                  return metrics.map(({ label, cur, prev, fmt, inv }) => {
+                                    const d = (typeof cur === 'number' && typeof prev === 'number' && Math.abs(cur - prev) >= 0.0005) ? cur - prev : null;
+                                    const dc = d !== null ? ((inv ? d < 0 : d > 0) ? 'text-emerald-600' : 'text-rose-500') : '';
+                                    return (
+                                      <div key={label} className="rounded-[0.6rem] bg-white/60 px-1.5 py-1">
+                                        <div className="text-[9px] uppercase tracking-[0.1em] text-[var(--ink-muted)]">{label}</div>
+                                        <div className="mt-0.5 flex items-baseline gap-1">
+                                          <span className="text-[11px] font-semibold text-[var(--ink-strong)]">{fmt(cur)}</span>
+                                          {d !== null && <span className={`text-[9px] font-medium ${dc}`}>{d > 0 ? '+' : ''}{d.toFixed(3)}</span>}
+                                        </div>
+                                      </div>
+                                    );
+                                  });
+                                })()}
                               </div>
                             </div>
                           ))}
@@ -939,6 +1010,9 @@ export default function StatsPage() {
                               <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.updatedAt)}</div>
                               <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
                             </div>
+                            {item.gameLabel && item.gameLabel !== item.gameId && (
+                              <div className="text-[10px] text-[var(--ink-muted)]">{item.gameLabel}</div>
+                            )}
                             <div className="mt-0.5 text-[11px] text-[var(--ink-strong)]">{item.market} · {item.selection}</div>
                             <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">Score {formatMetric(item.score)} · {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
                           </div>

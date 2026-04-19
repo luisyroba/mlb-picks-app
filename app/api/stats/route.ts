@@ -3,6 +3,8 @@ import {
   getPregameSnapshotsByIds,
   getOddsBoardCache,
   listConfirmedPicks,
+  getPremiumDailyLock,
+  createPremiumDailyLock,
   supabase
 } from '@/lib/db';
 import { autoSettlePendingPicks } from '@/lib/auto-settle-picks';
@@ -17,6 +19,24 @@ import { buildVercelBudgetSummary } from '@/lib/vercel-ops';
 const SUPABASE_FREE_DB_LIMIT_MB = 500;
 const ODDS_MONTHLY_LIMIT = 2500;
 const ODDS_REFRESH_COOLDOWN_MINUTES = Math.round(ODDS_REFRESH_COOLDOWN_MS / 60000);
+const PREMIUM_LOCK_MINUTES = 10;
+
+type PremiumPickResult = {
+  gameId: string;
+  gameLabel: string;
+  market: string;
+  selection: string;
+  confidence: string;
+  score: number;
+  edge: number | null;
+  ev: number | null;
+  estimatedProbability: number | null;
+  impliedProbability: number | null;
+  executionOdds: number | null;
+  gameStartTime: string | null;
+  lockedAt?: string;
+  lockReason?: string;
+};
 
 type BucketSummary = {
   key: string;
@@ -53,6 +73,7 @@ type StorageBreakdown = {
 type SolidPickPoint = {
   date: string;
   gameId: string;
+  gameLabel: string;
   market: string;
   selection: string;
   confidence: string;
@@ -392,6 +413,7 @@ function buildSolidPickAudit(
     const candidate: SolidPickPoint = {
       date: key,
       gameId: String(pick.game_id ?? ''),
+      gameLabel: typeof pick.game_label === 'string' ? pick.game_label : String(pick.game_id ?? ''),
       market: String(pick.execution_market || pick.market || 'UNKNOWN'),
       selection: String(pick.execution_selection || pick.selection || 'NO BET'),
       confidence: String(pick.confidence ?? 'PASS'),
@@ -426,6 +448,14 @@ function buildSolidPickAudit(
   const history = [...grouped.values()].sort((left, right) => left.date.localeCompare(right.date));
   const descendingHistory = [...history].reverse();
   const activeToday = descendingHistory.find((item) => item.status === 'pending') ?? null;
+
+  console.log('[premium-audit] premiumCandidateSource', `${grouped.size} A-tier picks agrupados por fecha`);
+  console.log('[premium-audit] premiumSelected', activeToday ? {
+    gameId: activeToday.gameId, matchup: activeToday.gameId,
+    marketType: activeToday.market, selection: activeToday.selection,
+    tier: activeToday.confidence, score: activeToday.score,
+    edge: activeToday.edge, ev: activeToday.ev, odds: activeToday.executionOdds
+  } : 'null — sin pick pending hoy');
   const settledHistory = descendingHistory.filter((item) => item.status !== 'pending');
   const graded = settledHistory.filter((item) => item.status === 'won' || item.status === 'lost');
   const won = graded.filter((item) => item.status === 'won').length;
@@ -944,15 +974,182 @@ export async function GET() {
         gameDate
       };
     });
-    const pickRecords = recentWithSnapshots.map(({ pick, gameDate }) => ({
+    const pickRecords = recentWithSnapshots.map(({ pick, snapshotPayload, gameDate }) => ({
       ...(pick as Record<string, unknown>),
-      game_date_key: normalizeDateKey(gameDate)
+      game_date_key: normalizeDateKey(gameDate),
+      game_label: getGameLabel(snapshotPayload, String(pick.game_id ?? ''))
     }));
     const trend = buildTrendSeries(pickRecords);
 
     const solidPick = buildSolidPickAudit(
       pickRecords
     );
+
+    const todayDateKey = formatUsageDateKey();
+    const rawTodayCandidates = recentWithSnapshots
+      .filter(({ pick, gameDate }) => {
+        const key = normalizeDateKey(gameDate);
+        return String(pick.confidence) === 'A' && String(pick.status) === 'pending' && key === todayDateKey;
+      })
+      .map(({ pick, snapshotPayload, snapshot }) => {
+        const estimatedProbability =
+          typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
+            ? roundMetric(pick.estimated_probability)
+            : null;
+        const impliedProbability = roundMetric(getEffectiveImpliedProbability(pick as Record<string, unknown>));
+        return {
+          gameId: String(pick.game_id ?? ''),
+          gameLabel: getGameLabel(snapshotPayload, String(pick.game_id ?? '')),
+          market: String(pick.execution_market || pick.market || 'UNKNOWN'),
+          selection: buildExecutionTitle(pick as Record<string, unknown>),
+          confidence: String(pick.confidence ?? ''),
+          score: getSolidPickScore(pick as Record<string, unknown>),
+          edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
+          ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
+          estimatedProbability,
+          impliedProbability,
+          executionOdds:
+            typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
+              ? pick.execution_odds
+              : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
+                ? pick.odds
+                : null,
+          gameStartTime: snapshot?.start_time ?? null
+        };
+      });
+
+    // Group by dedupKey — highest score = current, second = prev (for delta display)
+    const dedupGroups = new Map<string, typeof rawTodayCandidates>();
+    for (const candidate of rawTodayCandidates) {
+      const dedupKey = `${candidate.gameId}|${candidate.market}|${candidate.selection}`;
+      const group = dedupGroups.get(dedupKey) ?? [];
+      group.push(candidate);
+      dedupGroups.set(dedupKey, group);
+    }
+
+    if (rawTodayCandidates.length > dedupGroups.size) {
+      console.log('[premium-duplicates-detected]', rawTodayCandidates.length, '->', dedupGroups.size);
+    }
+
+    const solidTodayRanking = [...dedupGroups.values()]
+      .map((group) => {
+        const sorted = [...group].sort((a, b) => b.score - a.score);
+        const current = sorted[0];
+        const prev = sorted.length > 1 ? sorted[1] : null;
+        return {
+          ...current,
+          prevScore: prev?.score ?? null,
+          prevEdge: prev?.edge ?? null,
+          prevEv: prev?.ev ?? null,
+          prevEstimatedProbability: prev?.estimatedProbability ?? null,
+          prevImpliedProbability: prev?.impliedProbability ?? null,
+          prevExecutionOdds: prev?.executionOdds ?? null,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (b.edge ?? 0) - (a.edge ?? 0) ||
+          (b.ev ?? 0) - (a.ev ?? 0) ||
+          a.gameId.localeCompare(b.gameId)
+      );
+
+    console.log('[premium-ranking-final]', solidTodayRanking.map((p) => ({
+      gameId: p.gameId, market: p.market, selection: p.selection,
+      score: p.score, prevScore: p.prevScore,
+      edge: p.edge, ev: p.ev, prob: p.estimatedProbability, odds: p.executionOdds
+    })));
+
+    // --- Premium daily lock (DB-backed, cross-device) ---
+    let lockPayload = await getPremiumDailyLock(todayDateKey).catch(() => null);
+
+    const liveTop = solidTodayRanking[0];
+    if (!lockPayload && liveTop?.gameStartTime) {
+      const lockThreshold = new Date(liveTop.gameStartTime).getTime() - PREMIUM_LOCK_MINUTES * 60 * 1000;
+      if (Date.now() >= lockThreshold) {
+        const newLockData: Record<string, unknown> = {
+          gameId: liveTop.gameId,
+          gameLabel: liveTop.gameLabel,
+          marketType: liveTop.market,
+          selection: liveTop.selection,
+          confidence: liveTop.confidence,
+          score: liveTop.score,
+          odds: liveTop.executionOdds,
+          edge: liveTop.edge,
+          ev: liveTop.ev,
+          probability: liveTop.estimatedProbability,
+          impliedProbability: liveTop.impliedProbability,
+          gameStartTime: liveTop.gameStartTime,
+          lockedAt: new Date().toISOString(),
+          lockReason: 'game_start_imminent'
+        };
+        const result = await createPremiumDailyLock(todayDateKey, newLockData).catch(() => null);
+        lockPayload = result?.payload ?? newLockData;
+      }
+    }
+
+    const isLocked = lockPayload !== null;
+    let premiumPick: PremiumPickResult | null = null;
+    let betterPickPostLock = false;
+    let betterPick: PremiumPickResult | null = null;
+
+    if (isLocked && lockPayload) {
+      const p = lockPayload as Record<string, unknown>;
+      premiumPick = {
+        gameId: String(p.gameId ?? ''),
+        gameLabel: String(p.gameLabel ?? ''),
+        market: String(p.marketType ?? p.market ?? ''),
+        selection: String(p.selection ?? ''),
+        confidence: String(p.confidence ?? ''),
+        score: typeof p.score === 'number' ? p.score : 0,
+        edge: typeof p.edge === 'number' ? p.edge : null,
+        ev: typeof p.ev === 'number' ? p.ev : null,
+        estimatedProbability: typeof p.probability === 'number' ? p.probability : null,
+        impliedProbability: typeof p.impliedProbability === 'number' ? p.impliedProbability : null,
+        executionOdds: typeof p.odds === 'number' ? p.odds : null,
+        gameStartTime: typeof p.gameStartTime === 'string' ? p.gameStartTime : null,
+        lockedAt: typeof p.lockedAt === 'string' ? p.lockedAt : undefined,
+        lockReason: typeof p.lockReason === 'string' ? p.lockReason : undefined
+      };
+      // Better pick post-lock: different identity (gameId|marketType|selection) AND higher score
+      const lockedKey = `${premiumPick.gameId}|${premiumPick.market}|${premiumPick.selection}`;
+      if (liveTop) {
+        const liveKey = `${liveTop.gameId}|${liveTop.market}|${liveTop.selection}`;
+        if (liveKey !== lockedKey && liveTop.score > premiumPick.score) {
+          betterPickPostLock = true;
+          betterPick = {
+            gameId: liveTop.gameId,
+            gameLabel: liveTop.gameLabel,
+            market: liveTop.market,
+            selection: liveTop.selection,
+            confidence: liveTop.confidence,
+            score: liveTop.score,
+            edge: liveTop.edge,
+            ev: liveTop.ev,
+            estimatedProbability: liveTop.estimatedProbability,
+            impliedProbability: liveTop.impliedProbability,
+            executionOdds: liveTop.executionOdds,
+            gameStartTime: liveTop.gameStartTime
+          };
+        }
+      }
+    } else if (liveTop) {
+      premiumPick = {
+        gameId: liveTop.gameId,
+        gameLabel: liveTop.gameLabel,
+        market: liveTop.market,
+        selection: liveTop.selection,
+        confidence: liveTop.confidence,
+        score: liveTop.score,
+        edge: liveTop.edge,
+        ev: liveTop.ev,
+        estimatedProbability: liveTop.estimatedProbability,
+        impliedProbability: liveTop.impliedProbability,
+        executionOdds: liveTop.executionOdds,
+        gameStartTime: liveTop.gameStartTime
+      };
+    }
+    // --- End premium lock ---
 
     const recent = recentWithSnapshots.map(({ pick, snapshotPayload, gameDate }) => ({
       id: pick.id,
@@ -963,6 +1160,13 @@ export async function GET() {
       selection: pick.execution_selection || pick.selection,
       confidence: pick.confidence,
       status: pick.status,
+      score: roundMetric(getSolidPickScore(pick as Record<string, unknown>)),
+      executionOdds:
+        typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
+          ? pick.execution_odds
+          : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
+            ? pick.odds
+            : null,
       edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
       ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
       profitUnits: roundMetric(pick.profit_units),
@@ -1003,7 +1207,14 @@ export async function GET() {
         odds: oddsUsage,
         vercel: vercelUsage
       },
-      solidPick,
+      solidPick: {
+        ...solidPick,
+        todayRanking: solidTodayRanking,
+        premiumPick,
+        isLocked,
+        betterPickPostLock,
+        ...(betterPick ? { betterPick } : {})
+      },
       recent
     });
   } catch (error) {
