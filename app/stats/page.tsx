@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   readSolidPick,
   writeSolidPick,
@@ -434,13 +434,19 @@ function BucketPerformanceBar({ bucket }: { bucket: BucketSummary }) {
 }
 
 function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
+  const [hoveredPoint, setHoveredPoint] = useState<{ index: number; x: number; y: number } | null>(null);
+
   const validPoints = points.filter(
     (point) =>
       typeof point.cumulativeProfitUnits === 'number' &&
       Number.isFinite(point.cumulativeProfitUnits)
   );
 
-  if (!validPoints.length) {
+  // Start from the first date that actually has settled picks
+  const firstMeaningfulIndex = validPoints.findIndex((p) => p.settled > 0 || p.graded > 0);
+  const chartPoints = firstMeaningfulIndex >= 0 ? validPoints.slice(firstMeaningfulIndex) : validPoints;
+
+  if (!chartPoints.length) {
     return (
       <div className="rounded-[1.3rem] border border-[var(--line-soft)] bg-white p-4 text-sm text-[var(--ink-soft)]">
         Aun no hay picks settled suficientes para dibujar una curva historica.
@@ -449,33 +455,33 @@ function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
   }
 
   const width = 720;
-  const height = 130;
+  const height = 160;
   const paddingX = 26;
   const paddingY = 14;
-  const values = validPoints.map((point) => point.cumulativeProfitUnits);
+  const values = chartPoints.map((point) => point.cumulativeProfitUnits);
   const minValue = Math.min(0, ...values);
   const maxValue = Math.max(0, ...values);
   const valueRange = Math.max(0.001, maxValue - minValue);
-  const lastPoint = validPoints[validPoints.length - 1];
+  const lastPoint = chartPoints[chartPoints.length - 1];
   const tone = getPerformanceTone(lastPoint?.cumulativeWinRate ?? null, lastPoint?.cumulativeProfitUnits ?? null, lastPoint?.cumulativeRoi ?? null);
   const stroke = performanceStroke(tone);
   const area = performanceAreaFill(tone);
 
   const xAt = (index: number) =>
-    paddingX + (index / Math.max(1, validPoints.length - 1)) * (width - paddingX * 2);
+    paddingX + (index / Math.max(1, chartPoints.length - 1)) * (width - paddingX * 2);
   const yAt = (value: number) =>
     height - paddingY - ((value - minValue) / valueRange) * (height - paddingY * 2);
   const zeroY = yAt(0);
   const areaPath = [
     `M ${xAt(0)} ${height - paddingY}`,
-    ...validPoints.map((point, index) => `L ${xAt(index)} ${yAt(point.cumulativeProfitUnits)}`),
-    `L ${xAt(validPoints.length - 1)} ${height - paddingY}`,
+    ...chartPoints.map((point, index) => `L ${xAt(index)} ${yAt(point.cumulativeProfitUnits)}`),
+    `L ${xAt(chartPoints.length - 1)} ${height - paddingY}`,
     'Z'
   ].join(' ');
 
   return (
     <div className="rounded-[1.35rem] border border-[var(--line-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(247,244,237,0.96))] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="h-auto min-h-[10rem] w-full">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="h-auto w-full">
         <path d={areaPath} fill={area} />
         <line x1={paddingX} x2={width - paddingX} y1={zeroY} y2={zeroY} stroke="color-mix(in oklch, var(--surface-navy) 14%, transparent)" strokeDasharray="5 5" />
         {[0.25, 0.5, 0.75].map((ratio) => (
@@ -491,21 +497,59 @@ function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
 
         <polyline
           fill="none"
-          points={validPoints.map((point, index) => `${xAt(index)},${yAt(point.cumulativeProfitUnits)}`).join(' ')}
+          points={chartPoints.map((point, index) => `${xAt(index)},${yAt(point.cumulativeProfitUnits)}`).join(' ')}
           stroke={stroke}
           strokeWidth="4.5"
           strokeLinejoin="round"
           strokeLinecap="round"
         />
 
-        {validPoints.map((point, index) => (
+        {chartPoints.map((point, index) => (
           <g key={`${point.date}-${index}`}>
-            <circle cx={xAt(index)} cy={yAt(point.cumulativeProfitUnits)} r="4.2" fill="#ffffff" stroke={stroke} strokeOpacity="0.32" />
+            <circle cx={xAt(index)} cy={yAt(point.cumulativeProfitUnits)} r="6" fill="#ffffff" stroke={stroke} strokeOpacity="0.32" />
+            <circle
+              cx={xAt(index)} cy={yAt(point.cumulativeProfitUnits)} r="14" fill="transparent"
+              style={{ cursor: 'pointer' }}
+              onMouseEnter={() => setHoveredPoint({ index, x: xAt(index), y: yAt(point.cumulativeProfitUnits) })}
+              onMouseLeave={() => setHoveredPoint(null)}
+            />
             <text x={xAt(index)} y={height - 4} textAnchor="middle" fill="color-mix(in oklch, var(--surface-navy) 44%, white)" fontSize="11" fontWeight="600">
               {formatShortDate(point.date)}
             </text>
           </g>
         ))}
+
+        {hoveredPoint !== null && (() => {
+          const pt = chartPoints[hoveredPoint.index];
+          const tx = hoveredPoint.x;
+          const ty = hoveredPoint.y;
+          const boxW = 160;
+          const boxH = 80;
+          const boxX = Math.min(Math.max(tx - boxW / 2, paddingX), width - paddingX - boxW);
+          const safeTop = paddingY + 2;
+          const safeBottom = height - paddingY - boxH - 2;
+          const rawBoxY = ty - boxH - 12;
+          const boxY = Math.min(Math.max(rawBoxY, safeTop), safeBottom);
+          return (
+            <g pointerEvents="none">
+              <rect x={boxX} y={boxY} width={boxW} height={boxH} rx="8" ry="8"
+                fill="white" stroke="rgba(9,28,57,0.10)" strokeWidth="1"
+                style={{ filter: 'drop-shadow(0 4px 12px rgba(9,28,57,0.12))' }} />
+              <text x={boxX + 10} y={boxY + 20} fontSize="13" fontWeight="700" fill="rgba(9,28,57,0.5)" letterSpacing="0.12em">
+                {formatShortDate(pt.date).toUpperCase()}
+              </text>
+              <text x={boxX + 10} y={boxY + 42} fontSize="17" fontWeight="700" fill={stroke}>
+                {formatUnits(pt.cumulativeProfitUnits)}
+              </text>
+              <text x={boxX + 10} y={boxY + 58} fontSize="12" fill="rgba(9,28,57,0.45)">
+                {`ROI ${formatMetric(pt.cumulativeRoi)}  ·  WR ${formatRate(pt.cumulativeWinRate)}`}
+              </text>
+              <text x={boxX + 10} y={boxY + 73} fontSize="12" fill="rgba(9,28,57,0.35)">
+                {`${pt.graded ?? 0} graded · ${pt.won ?? 0}W ${pt.lost ?? 0}L`}
+              </text>
+            </g>
+          );
+        })()}
       </svg>
     </div>
   );
@@ -517,8 +561,9 @@ export default function StatsPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeSolidPick, setActiveSolidPick] = useState<PersistedSolidPick | null>(null);
   const [solidHistoryVisibleCount, setSolidHistoryVisibleCount] = useState(SOLID_HISTORY_PAGE_SIZE);
+  const [solidHistoryOpen, setSolidHistoryOpen] = useState(false);
 
-  async function loadStats() {
+  const loadStats = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -533,11 +578,11 @@ export default function StatsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     void loadStats();
-  }, []);
+  }, [loadStats]);
 
   useEffect(() => {
     const dateKey = getTodayDateKey();
@@ -635,6 +680,23 @@ export default function StatsPage() {
     [solidHistoryVisibleCount, solidPick.history]
   );
   const hasMoreSolidHistory = solidPick.history.length > visibleSolidHistory.length;
+  const solidTotalProfit = useMemo(
+    () => solidPick.history.reduce((sum, item) => sum + (item.profitUnits ?? 0), 0),
+    [solidPick.history]
+  );
+  const todayTopPicks = useMemo(() => {
+    const today = getTodayDateKey();
+    const solidGameId = solidPick.today?.gameId ?? activeSolidPick?.gameId;
+    return (stats?.recent ?? [])
+      .filter((item) => {
+        const dateStr = item.gameDate ?? item.createdAt ?? '';
+        const normalizedDate = dateStr.slice(0, 10).replace(/-/g, '');
+        const normalizedToday = today.replace(/-/g, '');
+        return normalizedDate === normalizedToday && item.gameId !== solidGameId;
+      })
+      .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))
+      .slice(0, 2);
+  }, [stats?.recent, solidPick.today?.gameId, activeSolidPick?.gameId]);
 
   useEffect(() => {
     setSolidHistoryVisibleCount(SOLID_HISTORY_PAGE_SIZE);
@@ -691,7 +753,10 @@ export default function StatsPage() {
 
         {!loading && !error && summary && usage && (
           <>
-            <section className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+            {/* Row 2 — Profit acumulado + Sistema premium */}
+            <section className="mt-3 grid gap-3 xl:grid-cols-2">
+
+              {/* Profit acumulado */}
               <div className="glass-panel rounded-[1.7rem] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Profit acumulado</h2>
@@ -700,256 +765,321 @@ export default function StatsPage() {
                   </div>
                 </div>
                 <div className="mt-3"><ProfitTrendChart points={trend} /></div>
-                <div className="mt-2 grid gap-2 md:grid-cols-4">
-                  {trend.slice(-4).map((point) => (
-                    <div key={point.date} className="rounded-[1rem] bg-[var(--surface-soft)] px-2.5 py-2">
-                      <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">{formatShortDate(point.date)}</div>
-                      <div className="mt-1 text-base font-semibold text-[var(--ink-strong)]">{formatUnits(point.cumulativeProfitUnits)}</div>
-                      <div className="mt-1 text-[11px] text-[var(--ink-soft)]">ROI {formatMetric(point.cumulativeRoi)} / WR {formatRate(point.cumulativeWinRate)}</div>
-                    </div>
-                  ))}
-                </div>
               </div>
 
-              <div className="grid gap-3">
-                <div className="glass-panel rounded-[1.35rem] p-3.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">DB</div>
-                      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.db.estimatedUsedMb.toFixed(3)} MB</div>
-                    </div>
-                    <div className="text-right text-[11px] text-[var(--ink-soft)]">
-                      {usage.db.percentUsed.toFixed(1)}% de 500 MB
-                    </div>
-                  </div>
-                  <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        width: `${Math.min(100, usage.db.percentUsed)}%`,
-                        background: usage.db.percentUsed < 70
-                          ? 'var(--tone-good)'
-                          : usage.db.percentUsed < 90
-                            ? 'var(--tone-mid)'
-                            : 'var(--tone-bad)'
-                      }}
-                    />
-                  </div>
-                  <div className="mt-1.5 text-[11px] text-[var(--ink-soft)]">
-                    {usage.db.estimatedUsedMb > 0
-                      ? `Libre aprox. ${usage.db.remainingMb.toFixed(0)} MB · excluye payloads`
-                      : usage.db.note}
-                  </div>
-                </div>
+              {/* Sistema premium */}
+              <section className="relative overflow-hidden rounded-[1.7rem] border border-[#ead18f]/45 bg-[linear-gradient(145deg,rgba(255,248,224,0.92),rgba(255,255,255,0.98))] p-4 shadow-[0_18px_44px_rgba(160,126,50,0.14)]">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,221,136,0.25),transparent_46%),radial-gradient(circle_at_bottom_right,rgba(189,146,53,0.14),transparent_34%)]" />
+                <div className="relative">
+                  <div className="text-[10px] uppercase tracking-[0.24em] text-[#9b771c]">Pick solido diario</div>
+                  <h3 className="mt-0.5 font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Sistema premium</h3>
 
-                <div className="glass-panel rounded-[1.35rem] p-3.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Odds</div>
-                      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.odds.monthCount}</div>
-                      <div className="text-[11px] text-[var(--ink-soft)]">/ {usage.odds.monthlyLimit} mes</div>
+                  {/* Metrics 4-col: Record / WR / Profit / Racha */}
+                  <div className="mt-3 grid grid-cols-4 gap-2">
+                    <div className="rounded-[1.1rem] bg-[linear-gradient(135deg,#7f5a11,#d4a942)] p-2.5 text-white shadow-[0_12px_24px_rgba(127,90,17,0.2)]">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-white/60">Record</div>
+                      <div className="mt-1 text-lg font-semibold">{solidPick?.summary.won ?? 0}/{solidPick?.summary.total ?? 0}</div>
                     </div>
-                    <div className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${usage.odds.withinBudget ? 'border border-emerald-200 bg-emerald-50 text-emerald-800' : 'border border-rose-200 bg-rose-50 text-rose-800'}`}>
-                      {usage.odds.withinBudget ? 'En rango' : 'Ajustar'}
+                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">WR</div>
+                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatRate(solidPick?.summary.winRate)}</div>
+                    </div>
+                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Profit</div>
+                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatUnits(solidTotalProfit)}</div>
+                    </div>
+                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Racha</div>
+                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatStreak(solidPick?.summary.currentStreak)}</div>
                     </div>
                   </div>
-                  <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
-                    {usage.odds.todayCount} hoy · {usage.odds.remainingMonthCalls} restantes · cooldown {usage.odds.cooldownMinutes}m
-                  </div>
-                </div>
 
-                <div className="glass-panel rounded-[1.35rem] p-3.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Vercel</div>
-                      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">Hobby</div>
+                  {/* Pick de hoy */}
+                  <div className="mt-3 rounded-[1.1rem] border border-[#ead18f] bg-[linear-gradient(135deg,rgba(255,248,224,0.92),rgba(255,255,255,0.9))] p-3">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Pick sólido de hoy</div>
+                    <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">
+                      {activeSolidPick
+                        ? `${activeSolidPick.market} / ${formatPickLine(activeSolidPick.selection, activeSolidPick.line, activeSolidPick.market)}`
+                        : 'Sin pick sólido activo hoy'}
                     </div>
-                    {usage.vercel.live && (
-                      <div className="text-right text-[11px] text-[var(--ink-soft)]">
-                        {usage.vercel.live.readyProductionDeployments30d} prod listas
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
-                    Deploys 30d {usage.vercel.live?.deployments30d ?? '-'} · logs {usage.vercel.hobbyLimits.runtimeLogsHours}h
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
-              <div className="space-y-3">
-                <section className="relative overflow-hidden rounded-[1.6rem] border border-[#ead18f]/45 bg-[linear-gradient(145deg,rgba(255,248,224,0.92),rgba(255,255,255,0.98))] p-3 shadow-[0_18px_44px_rgba(160,126,50,0.14)]">
-                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,221,136,0.25),transparent_46%),radial-gradient(circle_at_bottom_right,rgba(189,146,53,0.14),transparent_34%)]" />
-                    <div className="relative flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.24em] text-[#9b771c]">Pick solido diario</div>
-                        <h3 className="mt-1 font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">Sistema premium</h3>
-                      </div>
-                      <div className="rounded-full border border-[#ead18f] bg-[rgba(255,249,229,0.92)] px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-[#8a6115]">
-                        WR {formatRate(solidPick?.summary.winRate)}
-                      </div>
-                    </div>
-
-                    <div className="relative mt-3 grid gap-2 md:grid-cols-4">
-                      <div className="rounded-[1.2rem] bg-[linear-gradient(135deg,#7f5a11,#d4a942)] p-3 text-white shadow-[0_18px_30px_rgba(127,90,17,0.22)]">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-white/60">Record</div>
-                        <div className="mt-1 text-xl font-semibold">{solidPick?.summary.won ?? 0}/{solidPick?.summary.total ?? 0}</div>
-                      </div>
-                      <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Settled</div>
-                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{solidPick?.summary.settled ?? 0}</div>
-                      </div>
-                      <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">WR</div>
-                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{formatRate(solidPick?.summary.winRate)}</div>
-                      </div>
-                      <div className="rounded-[1.2rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Racha</div>
-                        <div className="mt-1 text-xl font-semibold text-[var(--ink-strong)]">{formatStreak(solidPick?.summary.currentStreak)}</div>
-                      </div>
-                    </div>
-
-                    <div className="relative mt-4 grid gap-4">
-                      <div className="rounded-[1.2rem] border border-[#ead18f] bg-[linear-gradient(135deg,rgba(255,248,224,0.92),rgba(255,255,255,0.9))] p-4">
-                        <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Pick solido de hoy</div>
-                        <div className="mt-2 text-lg font-semibold text-[var(--ink-strong)]">
-                          {activeSolidPick
-                            ? `${activeSolidPick.market} / ${formatPickLine(activeSolidPick.selection, activeSolidPick.line, activeSolidPick.market)}`
-                            : 'Sin pick solido activo hoy'}
-                        </div>
-                        <div className="hidden">
-                          {solidPick.today ? `${formatDateLabel(solidPick.today.updatedAt)} · ${solidPick.today.confidence}` : 'Necesita picks confirmados para crear historial.'}
-                        </div>
-                        <div className="mt-1 text-sm text-[var(--ink-soft)]">
-                          {activeSolidPick
-                            ? `${activeSolidPick.gameLabel} · ${activeSolidPick.confidence}`
-                            : 'Se mostrara aqui cuando el slate de hoy deje un pick premium activo.'}
-                        </div>
-                        {activeSolidPick && (
-                          <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                            <div className="rounded-[0.95rem] bg-white/70 px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Cuota</div>
-                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">{formatOdds(activeSolidPick.odds)}</div>
-                            </div>
-                            <div className="rounded-[0.95rem] bg-white/70 px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Score</div>
-                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.score)}</div>
-                            </div>
-                            <div className="rounded-[0.95rem] bg-white/70 px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Edge / EV</div>
-                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.edge)} / {formatMetric(activeSolidPick.ev)}</div>
-                            </div>
-                            <div className="rounded-[0.95rem] bg-white/70 px-3 py-2">
-                              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Estado</div>
-                              <div className="mt-1 font-semibold text-[var(--ink-strong)]">
-                                {activeSolidPick.settledStatus?.toUpperCase() ?? 'PENDING'}
-                              </div>
-                              {activeSolidPick.settledStatus && typeof activeSolidPick.profitUnits === 'number' && (
-                                <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{formatUnits(activeSolidPick.profitUnits)}</div>
-                              )}
-                            </div>
+                    {activeSolidPick ? (
+                      <>
+                        <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{activeSolidPick.gameLabel} · {activeSolidPick.confidence}</div>
+                        <div className="mt-2 grid grid-cols-4 gap-1.5">
+                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Cuota</div>
+                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatOdds(activeSolidPick.odds)}</div>
                           </div>
-                        )}
-                        {!activeSolidPick && (
-                          <div className="mt-3 rounded-[0.95rem] bg-white/70 px-3 py-3 text-sm text-[var(--ink-soft)]">
-                            Hoy todavia no hay un pick solido activo pendiente. Cuando el sistema fije uno, aparecera aqui y se mantendra estable salvo que el mercado lo invalide.
+                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Score</div>
+                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.score)}</div>
                           </div>
-                        )}
-                        {activeSolidPick?.note && (
-                          <div className="mt-3 rounded-[0.95rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-3 py-2 text-xs text-[#6d5220]">
+                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Edge</div>
+                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(activeSolidPick.edge)}</div>
+                          </div>
+                          <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
+                            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Estado</div>
+                            <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">
+                              {activeSolidPick.settledStatus?.toUpperCase() ?? 'PENDING'}
+                            </div>
+                            {activeSolidPick.settledStatus && typeof activeSolidPick.profitUnits === 'number' && (
+                              <div className="text-[10px] text-[var(--ink-soft)]">{formatUnits(activeSolidPick.profitUnits)}</div>
+                            )}
+                          </div>
+                        </div>
+                        {activeSolidPick.note && (
+                          <div className="mt-2 rounded-[0.8rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-2.5 py-1.5 text-[11px] text-[#6d5220]">
                             {activeSolidPick.note}
                           </div>
                         )}
+                      </>
+                    ) : (
+                      <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
+                        Se mostrará aquí cuando el slate de hoy deje un pick premium activo.
                       </div>
+                    )}
+                  </div>
 
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Historial sólido</div>
-                          <div className="text-[11px] text-[var(--ink-soft)]">{solidPick.history.length} settles</div>
-                        </div>
-                        {visibleSolidHistory.map((item) => (
-                          <div key={`${item.date}-${item.gameId}`} className="rounded-[1.05rem] bg-[var(--surface-soft)] p-2.5">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="text-sm font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.updatedAt)}</div>
-                              <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">{item.status} / {item.confidence}</div>
+                  {/* Panel swap: Top Score / Historial */}
+                  <div className="mt-3">
+                    {/* Tab switcher */}
+                    <div className="mb-2 flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setSolidHistoryOpen(false)}
+                        className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] transition ${
+                          !solidHistoryOpen
+                            ? 'border-[#ead18f] bg-[rgba(255,248,224,1)] text-[#8a6115]'
+                            : 'border-[#efe1b8] bg-transparent text-[var(--ink-muted)] hover:bg-[rgba(255,248,224,0.5)]'
+                        }`}
+                      >
+                        Top score
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSolidHistoryOpen(true)}
+                        className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] transition ${
+                          solidHistoryOpen
+                            ? 'border-[#ead18f] bg-[rgba(255,248,224,1)] text-[#8a6115]'
+                            : 'border-[#efe1b8] bg-transparent text-[var(--ink-muted)] hover:bg-[rgba(255,248,224,0.5)]'
+                        }`}
+                      >
+                        Historial · {solidPick.history.length}
+                      </button>
+                    </div>
+
+                    {/* Panel: Top score */}
+                    {!solidHistoryOpen && (() => {
+                      const topItems = [
+                        ...(solidPick.today ? [{
+                          rank: 1,
+                          market: solidPick.today.market,
+                          selection: solidPick.today.selection,
+                          gameLabel: activeSolidPick?.gameLabel ?? null,
+                          score: solidPick.today.score as number | null,
+                          odds: solidPick.today.executionOdds ?? null,
+                          edge: solidPick.today.edge ?? null,
+                          ev: solidPick.today.ev ?? null,
+                          chosen: true,
+                        }] : []),
+                        ...todayTopPicks.map((item, idx) => ({
+                          rank: idx + 2,
+                          market: item.market,
+                          selection: item.selection,
+                          gameLabel: item.gameLabel ?? null,
+                          score: null as number | null,
+                          odds: null as number | null,
+                          edge: item.edge ?? null,
+                          ev: item.ev ?? null,
+                          chosen: false,
+                        })),
+                      ];
+
+                      if (!topItems.length) {
+                        return <div className="py-2 text-[11px] text-[var(--ink-soft)]">Sin candidatos para hoy</div>;
+                      }
+
+                      return (
+                        <div className="space-y-1.5">
+                          {topItems.map((pick) => (
+                            <div
+                              key={pick.rank}
+                              className={`rounded-[0.9rem] px-2.5 py-2 ${pick.chosen ? 'border border-[#ead18f]/60 bg-[rgba(255,248,224,0.8)]' : 'border border-[var(--line-soft)] bg-[var(--surface-soft)]'}`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-4 shrink-0 text-[10px] font-bold text-[var(--ink-muted)]">#{pick.rank}</span>
+                                <span
+                                  className="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
+                                  style={marketPillStyle(pick.market)}
+                                >
+                                  {pick.market}
+                                </span>
+                                <span className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{pick.selection}</span>
+                              </div>
+                              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0 pl-6 text-[10px] text-[var(--ink-soft)]">
+                                {pick.gameLabel && <span className="text-[var(--ink-muted)]">{pick.gameLabel}</span>}
+                                {pick.score !== null && <span>Score {formatMetric(pick.score)}</span>}
+                                {pick.odds !== null && <span>@ {formatOdds(pick.odds)}</span>}
+                                {pick.edge !== null && <span>Edge {formatMetric(pick.edge)}</span>}
+                                {pick.ev !== null && <span>EV {formatMetric(pick.ev)}</span>}
+                              </div>
                             </div>
-                            <div className="mt-1 text-sm text-[var(--ink-strong)]">{item.market} / {item.selection}</div>
-                            <div className="mt-1 text-xs text-[var(--ink-soft)]">Score {formatMetric(item.score)} · Cuota {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Panel: Historial */}
+                    {solidHistoryOpen && (
+                      <div className="space-y-1">
+                        {visibleSolidHistory.map((item) => (
+                          <div key={`${item.date}-${item.gameId}`} className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.updatedAt)}</div>
+                              <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
+                            </div>
+                            <div className="mt-0.5 text-[11px] text-[var(--ink-strong)]">{item.market} · {item.selection}</div>
+                            <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">Score {formatMetric(item.score)} · {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
                           </div>
                         ))}
                         {hasMoreSolidHistory && (
                           <button
                             type="button"
                             onClick={() => setSolidHistoryVisibleCount((current) => current + SOLID_HISTORY_PAGE_SIZE)}
-                            className="w-full rounded-[0.95rem] border border-[var(--line-soft)] bg-white px-3 py-2 text-sm font-semibold text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
+                            className="w-full rounded-[0.85rem] border border-[var(--line-soft)] bg-white px-3 py-1.5 text-xs font-semibold text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
                           >
                             Ver más historial
                           </button>
                         )}
                       </div>
-                    </div>
-                  </section>
-              </div>
-
-              <div className="space-y-3">
-                <section className="glass-panel rounded-[1.6rem] p-3">
-                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
-                  <div className="mt-3 space-y-3">
-                    {byConfidence.map((bucket) => {
-                      const tone = getPerformanceTone(bucket.winRate, bucket.profitUnits, bucket.avgEv);
-                      const fill = Math.max(10, Math.min(100, (bucket.winRate ?? 0) * 100));
-
-                      return (
-                        <div key={bucket.key} className="rounded-[1.1rem] border border-[var(--line-soft)] bg-white px-3 py-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
-                                style={confidencePillStyle(bucket.key)}
-                              >
-                                Tier {bucket.key}
-                              </span>
-                              <div className="text-sm font-semibold text-[var(--ink-strong)]">
-                                {bucket.total} picks · WR {formatRate(bucket.winRate)}
-                              </div>
-                            </div>
-                            <div className={`text-sm font-semibold ${performanceTextClasses(tone)}`}>{formatUnits(bucket.profitUnits)}</div>
-                          </div>
-                          <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
-                            <div className="h-full rounded-full" style={{ ...performanceBarStyle(tone), width: `${fill}%` }} />
-                          </div>
-                          <div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--ink-soft)]">
-                            <span>Edge {formatMetric(bucket.avgEdge)}</span>
-                            <span>EV {formatMetric(bucket.avgEv)}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                    )}
                   </div>
-                </section>
-
-                <section className="glass-panel rounded-[1.6rem] p-3">
-                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Rendimiento por Mercado</h3>
-                  <div className="mt-3 space-y-3">
-                    {byMarket.map((bucket) => (
-                      <BucketPerformanceBar key={bucket.key} bucket={bucket} />
-                    ))}
-                  </div>
-                </section>
-
-                <section className="glass-panel rounded-[1.6rem] p-3">
-                  <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Backtesting por Edge</h3>
-                  <div className="mt-3 space-y-3">
-                    {byEdgeRange.map((bucket) => (
-                      <BucketPerformanceBar key={bucket.key} bucket={bucket} />
-                    ))}
-                  </div>
-                </section>
-              </div>
-
+                </div>
+              </section>
             </section>
 
+            {/* Row 3 — Performance 3-col */}
+            <section className="mt-3 grid gap-3 xl:grid-cols-3">
+              <section className="glass-panel rounded-[1.6rem] p-3">
+                <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
+                <div className="mt-3 space-y-2">
+                  {byConfidence.map((bucket) => {
+                    const tone = getPerformanceTone(bucket.winRate, bucket.profitUnits, bucket.avgEv);
+                    const fill = Math.max(10, Math.min(100, (bucket.winRate ?? 0) * 100));
+                    return (
+                      <div key={bucket.key} className="rounded-[1.1rem] border border-[var(--line-soft)] bg-white px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                              style={confidencePillStyle(bucket.key)}
+                            >
+                              Tier {bucket.key}
+                            </span>
+                            <div className="text-sm font-semibold text-[var(--ink-strong)]">
+                              {bucket.total} picks · WR {formatRate(bucket.winRate)}
+                            </div>
+                          </div>
+                          <div className={`text-sm font-semibold ${performanceTextClasses(tone)}`}>{formatUnits(bucket.profitUnits)}</div>
+                        </div>
+                        <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+                          <div className="h-full rounded-full" style={{ ...performanceBarStyle(tone), width: `${fill}%` }} />
+                        </div>
+                        <div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--ink-soft)]">
+                          <span>Edge {formatMetric(bucket.avgEdge)}</span>
+                          <span>EV {formatMetric(bucket.avgEv)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="glass-panel rounded-[1.6rem] p-3">
+                <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Rendimiento por Mercado</h3>
+                <div className="mt-3 space-y-3">
+                  {byMarket.map((bucket) => (
+                    <BucketPerformanceBar key={bucket.key} bucket={bucket} />
+                  ))}
+                </div>
+              </section>
+
+              <section className="glass-panel rounded-[1.6rem] p-3">
+                <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Backtesting por Edge</h3>
+                <div className="mt-3 space-y-3">
+                  {byEdgeRange.map((bucket) => (
+                    <BucketPerformanceBar key={bucket.key} bucket={bucket} />
+                  ))}
+                </div>
+              </section>
+            </section>
+
+            {/* Row 4 — Infraestructura 3-col */}
+            <section className="mt-3 grid gap-3 xl:grid-cols-3">
+              <div className="glass-panel rounded-[1.35rem] p-3.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">DB</div>
+                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.db.estimatedUsedMb.toFixed(3)} MB</div>
+                  </div>
+                  <div className="text-right text-[11px] text-[var(--ink-soft)]">
+                    {usage.db.percentUsed.toFixed(1)}% de 500 MB
+                  </div>
+                </div>
+                <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.min(100, usage.db.percentUsed)}%`,
+                      background: usage.db.percentUsed < 70
+                        ? 'var(--tone-good)'
+                        : usage.db.percentUsed < 90
+                          ? 'var(--tone-mid)'
+                          : 'var(--tone-bad)'
+                    }}
+                  />
+                </div>
+                <div className="mt-1.5 text-[11px] text-[var(--ink-soft)]">
+                  {usage.db.estimatedUsedMb > 0
+                    ? `Libre aprox. ${usage.db.remainingMb.toFixed(0)} MB · excluye payloads`
+                    : usage.db.note}
+                </div>
+              </div>
+
+              <div className="glass-panel rounded-[1.35rem] p-3.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Odds</div>
+                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.odds.monthCount}</div>
+                    <div className="text-[11px] text-[var(--ink-soft)]">/ {usage.odds.monthlyLimit} mes</div>
+                  </div>
+                  <div className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${usage.odds.withinBudget ? 'border border-emerald-200 bg-emerald-50 text-emerald-800' : 'border border-rose-200 bg-rose-50 text-rose-800'}`}>
+                    {usage.odds.withinBudget ? 'En rango' : 'Ajustar'}
+                  </div>
+                </div>
+                <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
+                  {usage.odds.todayCount} hoy · {usage.odds.remainingMonthCalls} restantes · cooldown {usage.odds.cooldownMinutes}m
+                </div>
+              </div>
+
+              <div className="glass-panel rounded-[1.35rem] p-3.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Vercel</div>
+                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">Hobby</div>
+                  </div>
+                  {usage.vercel.live && (
+                    <div className="text-right text-[11px] text-[var(--ink-soft)]">
+                      {usage.vercel.live.readyProductionDeployments30d} prod listas
+                    </div>
+                  )}
+                </div>
+                <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
+                  Deploys 30d {usage.vercel.live?.deployments30d ?? '-'} · logs {usage.vercel.hobbyLimits.runtimeLogsHours}h
+                </div>
+              </div>
+            </section>
           </>
         )}
       </div>

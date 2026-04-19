@@ -189,8 +189,8 @@ export default function PicksPage() {
           <div className="flex flex-wrap items-center justify-end gap-3">
             <div className="flex flex-wrap items-center gap-2">
               {[
-                { value: '7d', label: '7 dÃ­as' },
-                { value: '30d', label: '30 dÃ­as' },
+                { value: '7d', label: '7 días' },
+                { value: '30d', label: '30 días' },
                 { value: 'all', label: 'Todo' }
               ].map((item) => (
                 <button
