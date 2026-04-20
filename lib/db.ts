@@ -286,6 +286,9 @@ export function isConfirmedPickRecord(
 ): boolean {
   if (!pick || isNoBetLikePickRecord(pick)) return false;
 
+  const status = 'status' in pick ? String(pick.status ?? '') : '';
+  if (status === 'won' || status === 'lost' || status === 'void') return true;
+
   const executionSelection = readPickString(
     'execution_selection' in pick ? pick.execution_selection : undefined
   );
@@ -695,7 +698,7 @@ export async function listPicks(options?: {
   }
 
   if (!options?.includeUnconfirmed) {
-    query = query.or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null');
+    query = query.or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)');
   }
 
   query = query.order(options?.orderBy ?? 'updated_at', {

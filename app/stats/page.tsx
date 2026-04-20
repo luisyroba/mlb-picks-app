@@ -485,17 +485,15 @@ function ProfitTrendChart({ points }: { points: TrendPoint[] }) {
       Number.isFinite(point.cumulativeProfitUnits)
   );
 
-  // Start from the first date that actually has settled picks
-  const firstMeaningfulIndex = validPoints.findIndex((p) => p.settled > 0 || p.graded > 0);
-  const chartPoints = firstMeaningfulIndex >= 0 ? validPoints.slice(firstMeaningfulIndex) : validPoints;
+const chartPoints = validPoints;
 
-  if (!chartPoints.length) {
-    return (
-      <div className="rounded-[1.3rem] border border-[var(--line-soft)] bg-white p-4 text-sm text-[var(--ink-soft)]">
-        Aun no hay picks settled suficientes para dibujar una curva historica.
-      </div>
-    );
-  }
+if (!chartPoints.length) {
+  return (
+    <div className="rounded-[1.3rem] border border-[var(--line-soft)] bg-white p-4 text-sm text-[var(--ink-soft)]">
+      Aun no hay datos suficientes para dibujar una curva historica.
+    </div>
+  );
+}
 
   const width = 720;
   const height = 160;
@@ -1019,7 +1017,7 @@ export default function StatsPage() {
                         {visibleSolidHistory.map((item) => (
                           <div key={`${item.date}-${item.gameId}`} className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-1.5">
                             <div className="flex items-center justify-between gap-2">
-                              <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.updatedAt)}</div>
+                              <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.date)}</div>
                               <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
                             </div>
                             {item.gameLabel && item.gameLabel !== item.gameId && (

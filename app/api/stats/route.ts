@@ -15,6 +15,7 @@ import {
   SOLID_PICK_RESET_DATE_KEYS,
   USER_TIMEZONE
 } from '@/lib/runtime-config';
+import { getSlateDayKey } from '@/lib/slate-day';
 import { buildVercelBudgetSummary } from '@/lib/vercel-ops';
 
 const SUPABASE_FREE_DB_LIMIT_MB = 500;
@@ -237,14 +238,7 @@ function getPickAuditDateKey(pick: Record<string, unknown>): string | null {
   if (typeof pick.game_date_key === 'string' && pick.game_date_key.trim()) {
     return pick.game_date_key;
   }
-
-  return normalizeDateKey(
-    typeof pick.created_at === 'string'
-      ? pick.created_at
-      : typeof pick.updated_at === 'string'
-        ? pick.updated_at
-        : null
-  );
+  return null;
 }
 
 function buildTrendSeries(picks: Array<Record<string, unknown>>): TrendPoint[] {
@@ -257,8 +251,8 @@ function buildTrendSeries(picks: Array<Record<string, unknown>>): TrendPoint[] {
         return leftKey.localeCompare(rightKey);
       }
 
-      const leftMs = new Date(String(left.updated_at ?? '')).getTime();
-      const rightMs = new Date(String(right.updated_at ?? '')).getTime();
+      const leftMs = new Date(String(left.created_at ?? '')).getTime();
+      const rightMs = new Date(String(right.created_at ?? '')).getTime();
       return leftMs - rightMs;
     });
 
@@ -746,11 +740,16 @@ async function buildOddsUsageSummary() {
 
 export async function GET() {
   try {
-    const [, confirmedPicks] = await Promise.all([
-      withTimeout(autoSettlePendingPicks(), 4000, undefined),
-      listConfirmedPicks()
-    ]);
+const [, confirmedPicks, summaryViewResult] = await Promise.all([
+  withTimeout(autoSettlePendingPicks(), 4000, undefined),
+  listConfirmedPicks(),
+  supabase
+    .from('pick_stats_summary')
+    .select('*')
+    .single()
+]);
     const allPicks = confirmedPicks;
+    const summaryDb = summaryViewResult.data;
     const recentPicks = [...confirmedPicks].sort((left, right) => {
       const leftMs = new Date(String(left.created_at ?? left.updated_at ?? '')).getTime();
       const rightMs = new Date(String(right.created_at ?? right.updated_at ?? '')).getTime();
@@ -970,10 +969,11 @@ export async function GET() {
     });
     const pickRecords = recentWithSnapshots.map(({ pick, snapshotPayload, gameDate }) => ({
       ...(pick as Record<string, unknown>),
-      game_date_key: normalizeDateKey(gameDate),
+      game_date_key: getSlateDayKey(gameDate, pick.created_at),
       game_label: getGameLabel(snapshotPayload, String(pick.game_id ?? ''))
     }));
-    const trend = buildTrendSeries(pickRecords);
+  
+const trend = buildTrendSeries(pickRecords);
 
     const solidPick = buildSolidPickAudit(
       pickRecords
@@ -1179,20 +1179,20 @@ export async function GET() {
 
     return NextResponse.json({
       ok: true,
-      summary: {
-        totalPicks: confirmedPicks.length,
-        settledCount,
-        gradedCount,
-        pendingCount,
-        wonCount,
-        lostCount,
-        voidCount,
-        winRate: gradedCount > 0 ? roundMetric(wonCount / gradedCount) : null,
-        totalProfitUnits: roundMetric(totalProfitUnits),
-        roi: roundMetric(roi),
-        avgEdge: edgeCount > 0 ? roundMetric(edgeTotal / edgeCount) : null,
-        avgEv: evCount > 0 ? roundMetric(evTotal / evCount) : null
-      },
+summary: {
+  totalPicks: summaryDb?.total_picks ?? 0,
+  settledCount: (summaryDb?.wins ?? 0) + (summaryDb?.losses ?? 0),
+  gradedCount: (summaryDb?.wins ?? 0) + (summaryDb?.losses ?? 0),
+  pendingCount: summaryDb?.pending ?? 0,
+  wonCount: summaryDb?.wins ?? 0,
+  lostCount: summaryDb?.losses ?? 0,
+  voidCount: 0,
+  winRate: summaryDb?.wr ?? null,
+  totalProfitUnits: summaryDb?.profit ?? 0,
+  roi: summaryDb?.roi ?? null,
+  avgEdge: edgeCount > 0 ? roundMetric(edgeTotal / edgeCount) : null,
+  avgEv: evCount > 0 ? roundMetric(evTotal / evCount) : null
+},
       byMarket: byMarketSummary,
       byConfidence: byConfidenceSummary,
       byEdgeRange: byEdgeRangeSummary,

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { getSlateDayKey } from '@/lib/slate-day';
 
 type PickItem = {
   id: string;
@@ -35,6 +36,7 @@ type PicksResponse = {
 
 type FilterRange = '7d' | '30d' | 'all';
 
+
 function formatMetric(value?: number | null) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(3) : '-';
 }
@@ -66,6 +68,7 @@ function formatDateLabel(value?: string | null) {
   });
 }
 
+
 function statusClasses(status: string) {
   if (status === 'won') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   if (status === 'lost') return 'border-rose-200 bg-rose-50 text-rose-800';
@@ -85,9 +88,13 @@ function filterByRange(picks: PickItem[], range: FilterRange) {
 
   const days = range === '7d' ? 7 : 30;
   const minMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
   return picks.filter((pick) => {
-    const ms = new Date(pick.gameDate || pick.createdAt || pick.updatedAt).getTime();
-    return Number.isFinite(ms) && ms >= minMs;
+    const key = getSlateDayKey(pick.gameDate, pick.createdAt);
+    if (!key) return false;
+const [year, month, day] = key.split('-').map(Number);
+const ms = new Date(year, month - 1, day).getTime(); // local, sin UTC
+return Number.isFinite(ms) && ms >= minMs;
   });
 }
 
@@ -95,14 +102,7 @@ function groupByDate(picks: PickItem[]) {
   const groups = new Map<string, PickItem[]>();
 
   for (const pick of picks) {
-    const key = pick.gameDate
-      ? new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'America/Santiago',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit'
-        }).format(new Date(pick.gameDate))
-      : 'sin-fecha';
+    const key = getSlateDayKey(pick.gameDate, pick.createdAt) ?? 'sin-fecha';
     groups.set(key, [...(groups.get(key) ?? []), pick]);
   }
 
@@ -136,7 +136,7 @@ export default function PicksPage() {
   const [picks, setPicks] = useState<PickItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [range, setRange] = useState<FilterRange>('30d');
+  const [range, setRange] = useState<FilterRange>('all');
   const [selectedDate, setSelectedDate] = useState('');
 
   async function loadPicks() {
@@ -307,9 +307,9 @@ export default function PicksPage() {
           {visibleGroup ? (
             <section className="space-y-3" style={{ contentVisibility: 'auto' }}>
               <div className="flex items-center justify-between gap-3">
-                <h2 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">
-                  {formatDateLabel(visibleGroup.items[0]?.gameDate ?? visibleGroup.key)}
-                </h2>
+<h2 className="font-heading text-[1.4rem] font-semibold text-[var(--ink-strong)]">
+  {formatDateLabel(visibleGroup.key)}
+</h2>
                 <div className="rounded-full border border-[var(--line-soft)] bg-white px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-[var(--ink-soft)]">
                   {visibleGroup.items.length} picks
                 </div>
