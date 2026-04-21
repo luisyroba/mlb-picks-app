@@ -9,8 +9,6 @@ import {
 import { normalizeEntityName } from '@/lib/text-utils';
 import {
   clearSolidPick,
-  readSolidPick,
-  writeSolidPick,
   type PersistedSolidPick
 } from '@/lib/solid-pick-client';
 import type { LayerAOutput, NormalizedGameData } from '@/lib/types';
@@ -148,12 +146,32 @@ type CardMeta = {
   odds: number | null;
 };
 
-type SolidDailyCandidate = Omit<PersistedSolidPick, 'odds'> & {
+type SolidDailyPickState = PersistedSolidPick & {
   market: ExecutionLine['marketType'];
   odds: number;
   game: GameRow | null;
 };
 
+type StatsPremiumPick = {
+  gameId: string;
+  gameLabel: string;
+  market: string;
+  selection: string;
+  confidence: string;
+  score: number;
+  edge?: number | null;
+  ev?: number | null;
+  executionOdds?: number | null;
+  line?: number | null;
+  note?: string | null;
+};
+
+type HomeStatsResponse = {
+  ok?: boolean;
+  solidPick?: {
+    premiumPick?: StatsPremiumPick | null;
+  };
+};
 const ANALYSIS_CACHE_MAX_AGE_MS = 60_000;
 
 function ClockIcon() {
@@ -185,10 +203,6 @@ function TargetIcon() {
       <path d="M19 12H22" strokeLinecap="round" />
     </svg>
   );
-}
-
-function LogoMark() {
-  return null;
 }
 
 function hexToRgbTuple(color?: string | null) {
@@ -284,6 +298,31 @@ function fmtProb(value?: number | null) {
 
 function fmtUnits(value?: number | null) {
   return typeof value === 'number' && Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}u` : '-';
+}
+
+function isNumericOnly(value?: string | null) {
+  if (!value) return false;
+  return /^\d+$/.test(value.trim());
+}
+
+function resolveHomeMatchupLabel(
+  gameId: string,
+  fallbackGameLabel?: string | null,
+  sourceGames?: GameRow[]
+) {
+  const game = (sourceGames ?? []).find(
+    (item) => String(item.gameId) === String(gameId)
+  );
+
+  if (game) {
+    return `${game.awayTeam.name} @ ${game.homeTeam.name}`;
+  }
+
+  if (fallbackGameLabel && !isNumericOnly(fallbackGameLabel)) {
+    return fallbackGameLabel.trim();
+  }
+
+  return 'Partido desconocido';
 }
 
 function getDateKey(offset = 0) {
@@ -1697,36 +1736,6 @@ function getGameStateBadge(game: GameRow) {
   };
 }
 
-function getSolidConfidenceWeight(confidence?: string | null) {
-  if (confidence === 'A') return 30;
-  if (confidence === 'B') return 18;
-  if (confidence === 'C') return 8;
-  return 0;
-}
-
-const MANUAL_SOLID_PICK_OVERRIDES: Record<string, {
-  market: ExecutionLine['marketType'];
-  selectionIncludes: string;
-  line: number;
-}> = {
-  '2026-04-15': {
-    market: 'F5',
-    selectionIncludes: 'los angeles angels',
-    line: 1.5
-  }
-};
-
-function matchesSolidOverride(candidate: SolidDailyCandidate, dateKey: string) {
-  const override = MANUAL_SOLID_PICK_OVERRIDES[dateKey];
-  if (!override) return false;
-
-  return (
-    candidate.market === override.market &&
-    candidate.line === override.line &&
-    candidate.selection.toLowerCase().includes(override.selectionIncludes)
-  );
-}
-
 function getInningHeaders(game: GameRow) {
   if (game.innings <= 0) return [];
   return Array.from({ length: Math.min(Math.max(game.innings, 5), 10) }, (_, index) => index + 1);
@@ -1946,57 +1955,11 @@ export default function HomePage() {
   const liveCount = useMemo(() => games.filter((game) => game.state === 'in').length, [games]);
   const analyzedCount = useMemo(() => games.filter((game) => game.analysis.analyzed).length, [games]);
   const confirmedCount = useMemo(() => games.filter((game) => game.analysis.hasActivePick).length, [games]);
-  const [solidDailyPick, setSolidDailyPick] = useState<SolidDailyCandidate | null>(null);
+  const [solidDailyPick, setSolidDailyPick] = useState<SolidDailyPickState | null>(null);
   const [premiumDayClosed, setPremiumDayClosed] = useState<boolean | null>(null);
+  const [statsPremiumPick, setStatsPremiumPick] = useState<StatsPremiumPick | null>(null);
   const solidStorageDateKey = useMemo(() => getSolidStorageDateKey(0), []);
-  const solidDailyCandidates = useMemo(() => {
-    const sourceGames = todayGamesCache.length ? todayGamesCache : dayOffset === 0 ? games : [];
-
-    const sorted = sourceGames
-      .flatMap((game) => {
-        if (!game.analysis.hasActivePick || game.analysis.status !== 'pending' || game.analysis.confidence !== 'A') {
-          return [];
-        }
-
-        const gameAnalysis = analysisByGame[game.gameId];
-        const probability = gameAnalysis?.uiSummary?.finalPick?.probability ?? game.analysis.probability ?? 0;
-        const edge = gameAnalysis?.uiSummary?.finalPick?.edge ?? game.analysis.edge ?? 0;
-        const ev = gameAnalysis?.uiSummary?.finalPick?.ev ?? game.analysis.ev ?? 0;
-        const odds = game.analysis.odds ?? gameAnalysis?.confirmedPick?.odds ?? 0;
-        const market = (game.analysis.market ?? gameAnalysis?.confirmedPick?.market ?? 'ML') as ExecutionLine['marketType'];
-        const selection = game.analysis.selection ?? gameAnalysis?.confirmedPick?.selection ?? '';
-
-        if (!selection || !odds) {
-          return [];
-        }
-
-        const score =
-          getSolidConfidenceWeight(game.analysis.confidence) +
-          probability * 28 +
-          edge * 180 +
-          ev * 140;
-
-        return [{
-          dateKey: solidStorageDateKey,
-          game,
-          gameId: game.gameId,
-          gameLabel: `${game.awayTeam.abbr} @ ${game.homeTeam.abbr}`,
-          market,
-          selection,
-          line: game.analysis.line ?? gameAnalysis?.confirmedPick?.line ?? null,
-          odds,
-          confidence: game.analysis.confidence,
-          score,
-          edge,
-          ev,
-          note: null,
-          lockedAt: new Date().toISOString()
-        }];
-      })
-      .sort((left, right) => right.score - left.score || (right.edge ?? 0) - (left.edge ?? 0) || (right.ev ?? 0) - (left.ev ?? 0));
-
-    return sorted;
-  }, [analysisByGame, dayOffset, games, solidStorageDateKey, todayGamesCache]);
+ 
 
   useEffect(() => {
     setPremiumDayClosed(null);
@@ -2006,94 +1969,72 @@ export default function HomePage() {
       .catch(() => setPremiumDayClosed(false));
   }, [solidStorageDateKey]);
 
-  useEffect(() => {
-    // Wait for DB premium lock state before doing anything — avoids auto-picking when day is closed
-    if (premiumDayClosed === null) return;
+useEffect(() => {
+  let cancelled = false;
 
-    const stored = readSolidPick(solidStorageDateKey);
-    const overrideCandidate =
-      solidDailyCandidates.find((candidate) => matchesSolidOverride(candidate, solidStorageDateKey)) ?? null;
-    const topCandidate = overrideCandidate ?? solidDailyCandidates[0] ?? null;
-    const hasForcedOverride = Boolean(MANUAL_SOLID_PICK_OVERRIDES[solidStorageDateKey]);
+  async function loadPremiumPick() {
+    try {
+      const res = await fetch('/api/stats', { cache: 'no-store' });
+      const json = (await res.json()) as HomeStatsResponse;
 
-    if (hasForcedOverride && !overrideCandidate) {
-      clearSolidPick(solidStorageDateKey);
-      setSolidDailyPick(null);
-      return;
-    }
+      if (cancelled) return;
 
-    // DB says day is closed — don't show or write any pick
-    if (premiumDayClosed) {
-      clearSolidPick(solidStorageDateKey);
-      setSolidDailyPick(null);
-      return;
-    }
-
-    if (stored) {
-      const settledStoredGame = (todayGamesCache.length ? todayGamesCache : games).find(
-        (game) => game.gameId === stored.gameId && game.analysis.hasActivePick && game.analysis.status !== 'pending'
-      );
-
-      if (settledStoredGame) {
-        clearSolidPick(solidStorageDateKey);
-        setSolidDailyPick(null);
-        return;
+      const premiumPick = json?.solidPick?.premiumPick ?? null;
+      if (premiumPick) {
+        setStatsPremiumPick(premiumPick);
       }
-
-      const matched = solidDailyCandidates.find(
-        (candidate) =>
-          candidate.gameId === stored.gameId &&
-          candidate.market === stored.market &&
-          candidate.selection === stored.selection &&
-          candidate.line === stored.line
-      );
-
-      if (overrideCandidate && !matchesSolidOverride(stored as SolidDailyCandidate, solidStorageDateKey)) {
-        const fixed = {
-          ...overrideCandidate,
-          lockedAt: stored.lockedAt,
-          note: 'Fijado como pick sólido original del día.'
-        };
-        writeSolidPick(fixed);
-        setSolidDailyPick(fixed);
-        return;
+    } catch {
+      if (!cancelled) {
+        // mantener último premium pick válido
       }
-
-      if (matched) {
-        const frozen = {
-          ...matched,
-          lockedAt: stored.lockedAt,
-          note: stored.note ?? null
-        };
-        setSolidDailyPick(frozen);
-        return;
-      }
-
-      setSolidDailyPick({
-        ...stored,
-        market: stored.market as ExecutionLine['marketType'],
-        odds: stored.odds ?? 0,
-        game:
-          (todayGamesCache.length ? todayGamesCache : games).find((game) => game.gameId === stored.gameId) ?? null
-      });
-      return;
     }
+  }
 
-    if (!topCandidate) {
-      setSolidDailyPick(null);
-      return;
-    }
+  if (dayOffset === 0) {
+    void loadPremiumPick();
+  }
 
-    const initialPick = overrideCandidate
-      ? {
-          ...overrideCandidate,
-          note: 'Fijado como pick sólido original del día.'
-        }
-      : topCandidate;
+  return () => {
+    cancelled = true;
+  };
+}, [dayOffset, games]);
 
-    writeSolidPick(initialPick);
-    setSolidDailyPick(initialPick);
-  }, [games, premiumDayClosed, solidDailyCandidates, solidStorageDateKey, todayGamesCache]);
+useEffect(() => {
+  if (premiumDayClosed === null) return;
+
+  if (premiumDayClosed) {
+    clearSolidPick(solidStorageDateKey);
+    setSolidDailyPick(null);
+    return;
+  }
+
+  const sourceGames = todayGamesCache.length ? todayGamesCache : games;
+
+  if (!statsPremiumPick) {
+    return;
+  }
+
+  setSolidDailyPick({
+    dateKey: solidStorageDateKey,
+    gameId: statsPremiumPick.gameId,
+    gameLabel: resolveHomeMatchupLabel(
+      statsPremiumPick.gameId,
+      statsPremiumPick.gameLabel,
+      sourceGames
+    ),
+    market: statsPremiumPick.market as ExecutionLine['marketType'],
+    selection: statsPremiumPick.selection,
+    line: typeof statsPremiumPick.line === 'number' ? statsPremiumPick.line : null,
+    odds: statsPremiumPick.executionOdds ?? 0,
+    confidence: statsPremiumPick.confidence,
+    score: statsPremiumPick.score,
+    edge: statsPremiumPick.edge ?? null,
+    ev: statsPremiumPick.ev ?? null,
+    note: statsPremiumPick.note ?? null,
+    lockedAt: new Date().toISOString(),
+    game: sourceGames.find((game) => String(game.gameId) === String(statsPremiumPick.gameId)) ?? null
+  });
+}, [games, premiumDayClosed, solidStorageDateKey, statsPremiumPick, todayGamesCache]);
 
   const applyExecutionSlotFromAnalysis = useCallback((json: AnalyzeResponse | null) => {
     setSelectedExecutionSlot(getExecOptions(json?.executionRecommendation)[0]?.slot ?? 'recommended');
@@ -2490,7 +2431,6 @@ export default function HomePage() {
   }, [games, analysisByGame]);
 
   const selectedMeta = selectedGame ? cardMetaByGame[selectedGame.gameId] ?? getCardMeta(selectedGame, analysis) : null;
-  const selectedNoBetDetail = getNoBetExecutionDetail(analysis);
 
   return (
     <main className="px-3 pb-8 pt-4 lg:px-5">
@@ -2581,9 +2521,20 @@ export default function HomePage() {
                 <span className="text-[10px] uppercase tracking-[0.24em] text-[#9a7417]">Pick solido</span>
               </div>
               <div className="relative mt-2 text-base font-semibold text-[var(--ink-strong)]">
-                {solidDailyPick
-                  ? `${renderPickLabel(solidDailyPick.selection, solidDailyPick.line, solidDailyPick.market)} @ ${fmtNum(solidDailyPick.odds)}`
-                  : 'Sin pick solido activo hoy'}
+{solidDailyPick ? (
+  <>
+    <div className="font-semibold text-[var(--ink-strong)]">
+      {solidDailyPick.game
+        ? `${solidDailyPick.game.awayTeam.name} @ ${solidDailyPick.game.homeTeam.name}`
+        : solidDailyPick.gameLabel}
+    </div>
+    <div className="mt-1">
+      {`${renderPickLabel(solidDailyPick.selection, solidDailyPick.line, solidDailyPick.market)} @ ${fmtNum(solidDailyPick.odds)}`}
+    </div>
+  </>
+) : (
+  'Sin pick solido activo hoy'
+)}
               </div>
               {solidDailyPick && (
                 <div className="relative mt-1 text-xs text-[var(--ink-soft)]">

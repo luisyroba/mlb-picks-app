@@ -10,8 +10,9 @@ import {
   SOLID_PICK_RESET_DATE_KEYS,
   USER_TIMEZONE,
   formatDateKeyForTimezone,
-  formatDateTimeForTimezone
 } from '@/lib/runtime-config';
+
+type DbUsage = NonNullable<StatsResponse['usage']>['db'];
 
 type BucketSummary = {
   key: string;
@@ -236,17 +237,6 @@ function formatRate(value?: number | null) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function formatDateTime(value?: string | null) {
-  const formatted = formatDateTimeForTimezone(value, 'es-CL', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: 'numeric',
-    minute: '2-digit'
-  });
-  return formatted ?? value ?? '-';
-}
-
 function formatDateLabel(value?: string | null) {
   const date = parseUiDate(value);
   if (!date) return value ?? 'Sin fecha';
@@ -277,6 +267,36 @@ function formatOdds(value?: number | null) {
   return value.toFixed(2);
 }
 
+function formatGameLabel(gameLabel?: string | null) {
+  if (!gameLabel) return 'Partido desconocido';
+
+  const trimmed = gameLabel.trim();
+  if (!trimmed) return 'Partido desconocido';
+
+  return /^\d+$/.test(trimmed) ? 'Partido desconocido' : trimmed;
+}
+
+function resolveMatchupLabel(
+  gameId: string,
+  fallbackGameLabel?: string | null,
+  recent?: RecentItem[] | null
+) {
+  const recentMatch = (recent ?? []).find(
+    (item) => String(item.gameId) === String(gameId)
+  );
+
+  const displayTitle = recentMatch?.displayTitle?.trim();
+  if (displayTitle && /@|vs\.?/i.test(displayTitle)) {
+    return displayTitle;
+  }
+
+  const recentGameLabel = recentMatch?.gameLabel?.trim();
+  if (recentGameLabel && /@|vs\.?/i.test(recentGameLabel)) {
+    return recentGameLabel;
+  }
+
+  return formatGameLabel(fallbackGameLabel);
+}
 
 function formatStreak(streak?: { type: 'won' | 'lost'; count: number } | null) {
   if (!streak) return '-';
@@ -600,26 +620,52 @@ export default function StatsPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+// Storage separado: mismo shape que usage.db
+  const [storageData, setStorageData] = useState<DbUsage | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
   const [activeSolidPick, setActiveSolidPick] = useState<PersistedSolidPick | null>(null);
   const [solidHistoryVisibleCount, setSolidHistoryVisibleCount] = useState(SOLID_HISTORY_PAGE_SIZE);
   const [solidHistoryOpen, setSolidHistoryOpen] = useState(false);
 
-  const loadStats = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await fetch('/api/stats', { cache: 'no-store' });
-      const json = (await res.json()) as StatsResponse;
-      if (!res.ok || !json.ok) {
-        throw new Error(json.error || 'No se pudieron cargar las stats');
-      }
-      setStats(json);
-    } catch (statsError) {
-      setError(statsError instanceof Error ? statsError.message : 'Error cargando stats');
-    } finally {
-      setLoading(false);
+const loadStats = useCallback(async () => {
+  try {
+    // Carga principal del panel.
+    setLoading(true);
+    setError(null);
+
+    // Storage se maneja aparte para no frenar el render principal.
+    setStorageData(null);
+    setStorageLoading(true);
+
+    // 1) Stats principal.
+    const res = await fetch('/api/stats', { cache: 'no-store' });
+    const json = (await res.json()) as StatsResponse;
+
+    if (!res.ok || !json.ok) {
+      throw new Error(json.error || 'No se pudieron cargar las stats');
     }
-  }, []);
+
+    setStats(json);
+
+    // 2) Storage separado.
+    void fetch('/api/stats/storage', { cache: 'no-store' })
+      .then(async (storageRes) => {
+        const storageJson = await storageRes.json();
+        setStorageData(storageJson as DbUsage);
+      })
+      .catch(() => {
+        setStorageData(null);
+      })
+      .finally(() => {
+        setStorageLoading(false);
+      });
+  } catch (statsError) {
+    setError(statsError instanceof Error ? statsError.message : 'Error cargando stats');
+    setStorageLoading(false);
+  } finally {
+    setLoading(false);
+  }
+}, []);
 
   useEffect(() => {
     void loadStats();
@@ -649,14 +695,19 @@ export default function StatsPage() {
     setActiveSolidPick(stored);
   }, [stats?.recent]);
 
-  const summary = stats?.summary ?? null;
-  const usage = stats?.usage ?? null;
-  const trend = stats?.trend ?? [];
-  const byConfidence = stats?.byConfidence ?? [];
-  const byMarket = stats?.byMarket ?? [];
-  const byEdgeRange = stats?.byEdgeRange ?? [];
-  const solidPick = useMemo(() => {
-    const base = stats?.solidPick ?? {
+const summary = stats?.summary ?? null;
+const usage = stats?.usage ?? null;
+const trend = stats?.trend ?? [];
+const byConfidence = stats?.byConfidence ?? [];
+const byMarket = stats?.byMarket ?? [];
+const byEdgeRange = stats?.byEdgeRange ?? [];
+
+// DB card: si ya llegó el endpoint separado, usamos ese.
+// Si todavía no llega, usamos usage.db del payload principal.
+const dbUsage: DbUsage | null = storageData ?? usage?.db ?? null;
+
+const solidPick = useMemo(() => {
+  const base = stats?.solidPick ?? {
       today: null,
       summary: {
         total: 0,
@@ -849,7 +900,9 @@ export default function StatsPage() {
                           <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">
                             {pp.market} / {pp.selection}
                           </div>
-                          <div className="mt-0.5 text-xs text-[var(--ink-soft)]">{pp.gameLabel} · {pp.confidence}</div>
+                          <div className="mt-0.5 text-xs text-[var(--ink-soft)]">
+  {resolveMatchupLabel(pp.gameId, pp.gameLabel, stats?.recent)} · {pp.confidence}
+</div>
                           <div className="mt-2 grid grid-cols-4 gap-1.5">
                             <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
                               <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Cuota</div>
@@ -923,25 +976,26 @@ export default function StatsPage() {
                       const solidGameId = stats?.solidPick?.premiumPick?.gameId ?? solidPick.today?.gameId ?? activeSolidPick?.gameId;
                       const betterPostLock = stats?.solidPick?.betterPickPostLock;
                       const betterPickData = stats?.solidPick?.betterPick;
-                      const topItems = todayTopPicks.map((item, idx) => ({
-                        rank: idx + 1,
-                        market: item.market,
-                        selection: item.selection,
-                        gameLabel: item.gameLabel,
-                        score: item.score,
-                        odds: item.executionOdds ?? null,
-                        edge: item.edge ?? null,
-                        ev: item.ev ?? null,
-                        estimatedProbability: item.estimatedProbability ?? null,
-                        impliedProbability: item.impliedProbability ?? null,
-                        prevScore: item.prevScore ?? null,
-                        prevOdds: item.prevExecutionOdds ?? null,
-                        prevEdge: item.prevEdge ?? null,
-                        prevEv: item.prevEv ?? null,
-                        prevEstimatedProbability: item.prevEstimatedProbability ?? null,
-                        prevImpliedProbability: item.prevImpliedProbability ?? null,
-                        chosen: item.gameId === solidGameId,
-                      }));
+const topItems = todayTopPicks.map((item, idx) => ({
+  rank: idx + 1,
+  gameId: item.gameId,
+  market: item.market,
+  selection: item.selection,
+  gameLabel: resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent),
+  score: item.score,
+  odds: item.executionOdds ?? null,
+  edge: item.edge ?? null,
+  ev: item.ev ?? null,
+  estimatedProbability: item.estimatedProbability ?? null,
+  impliedProbability: item.impliedProbability ?? null,
+  prevScore: item.prevScore ?? null,
+  prevOdds: item.prevExecutionOdds ?? null,
+  prevEdge: item.prevEdge ?? null,
+  prevEv: item.prevEv ?? null,
+  prevEstimatedProbability: item.prevEstimatedProbability ?? null,
+  prevImpliedProbability: item.prevImpliedProbability ?? null,
+  chosen: item.gameId === solidGameId,
+}));
 
                       if (!topItems.length) {
                         return (
@@ -959,7 +1013,9 @@ export default function StatsPage() {
                               <div className="mt-0.5 text-[11px] font-semibold text-[var(--ink-strong)]">
                                 {betterPickData.market} · {betterPickData.selection} · Score {formatMetric(betterPickData.score)}
                               </div>
-                              <div className="text-[10px] text-[#8a6115]">{betterPickData.gameLabel}</div>
+                              <div className="text-[10px] text-[#8a6115]">
+  {resolveMatchupLabel(betterPickData.gameId, betterPickData.gameLabel, stats?.recent)}
+</div>
                             </div>
                           )}
                           {topItems.map((pick) => (
@@ -1020,9 +1076,9 @@ export default function StatsPage() {
                               <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.date)}</div>
                               <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
                             </div>
-                            {item.gameLabel && item.gameLabel !== item.gameId && (
-                              <div className="text-[10px] text-[var(--ink-muted)]">{item.gameLabel}</div>
-                            )}
+<div className="text-[10px] text-[var(--ink-muted)]">
+  {resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent)}
+</div>
                             <div className="mt-0.5 text-[11px] text-[var(--ink-strong)]">{item.market} · {item.selection}</div>
                             <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">Score {formatMetric(item.score)} · {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
                           </div>
@@ -1099,71 +1155,108 @@ export default function StatsPage() {
               </section>
             </section>
 
-            {/* Row 4 — Infraestructura 3-col */}
-            <section className="mt-3 grid gap-3 xl:grid-cols-3">
-              <div className="glass-panel rounded-[1.35rem] p-3.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">DB</div>
-                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.db.estimatedUsedMb.toFixed(3)} MB</div>
-                  </div>
-                  <div className="text-right text-[11px] text-[var(--ink-soft)]">
-                    {usage.db.percentUsed.toFixed(1)}% de 500 MB
-                  </div>
-                </div>
-                <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${Math.min(100, usage.db.percentUsed)}%`,
-                      background: usage.db.percentUsed < 70
-                        ? 'var(--tone-good)'
-                        : usage.db.percentUsed < 90
-                          ? 'var(--tone-mid)'
-                          : 'var(--tone-bad)'
-                    }}
-                  />
-                </div>
-                <div className="mt-1.5 text-[11px] text-[var(--ink-soft)]">
-                  {usage.db.estimatedUsedMb > 0
-                    ? `Libre aprox. ${usage.db.remainingMb.toFixed(0)} MB · excluye payloads`
-                    : usage.db.note}
-                </div>
-              </div>
+{/* Row 4 — Infraestructura 3-col */}
+<section className="mt-3 grid gap-3 xl:grid-cols-3">
+  <div className="glass-panel rounded-[1.35rem] p-3.5">
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">DB</div>
+        <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">
+          {dbUsage ? dbUsage.estimatedUsedMb.toFixed(3) : '0.000'} MB
+        </div>
+      </div>
+      <div className="text-right text-[11px] text-[var(--ink-soft)]">
+        {dbUsage ? dbUsage.percentUsed.toFixed(1) : '0.0'}% de 500 MB
+      </div>
+    </div>
 
-              <div className="glass-panel rounded-[1.35rem] p-3.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Odds</div>
-                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">{usage.odds.monthCount}</div>
-                    <div className="text-[11px] text-[var(--ink-soft)]">/ {usage.odds.monthlyLimit} mes</div>
-                  </div>
-                  <div className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${usage.odds.withinBudget ? 'border border-emerald-200 bg-emerald-50 text-emerald-800' : 'border border-rose-200 bg-rose-50 text-rose-800'}`}>
-                    {usage.odds.withinBudget ? 'En rango' : 'Ajustar'}
-                  </div>
-                </div>
-                <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
-                  {usage.odds.todayCount} hoy · {usage.odds.remainingMonthCalls} restantes · cooldown {usage.odds.cooldownMinutes}m
-                </div>
-              </div>
+    <div className="mt-3 h-2.5 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+      <div
+        className="h-full rounded-full"
+        style={{
+          width: `${Math.min(100, dbUsage?.percentUsed ?? 0)}%`,
+          background:
+            (dbUsage?.percentUsed ?? 0) < 70
+              ? 'var(--tone-good)'
+              : (dbUsage?.percentUsed ?? 0) < 90
+                ? 'var(--tone-mid)'
+                : 'var(--tone-bad)'
+        }}
+      />
+    </div>
 
-              <div className="glass-panel rounded-[1.35rem] p-3.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Vercel</div>
-                    <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">Hobby</div>
-                  </div>
-                  {usage.vercel.live && (
-                    <div className="text-right text-[11px] text-[var(--ink-soft)]">
-                      {usage.vercel.live.readyProductionDeployments30d} prod listas
-                    </div>
-                  )}
-                </div>
-                <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
-                  Deploys 30d {usage.vercel.live?.deployments30d ?? '-'} · logs {usage.vercel.hobbyLimits.runtimeLogsHours}h
-                </div>
-              </div>
-            </section>
+    <div className="mt-1.5 flex items-center justify-between gap-3 text-[11px] text-[var(--ink-soft)]">
+      <div>
+        {dbUsage
+          ? dbUsage.estimatedUsedMb > 0
+            ? `Libre aprox. ${dbUsage.remainingMb.toFixed(0)} MB · excluye payloads`
+            : dbUsage.note
+          : 'No se pudo cargar storage'}
+      </div>
+
+      {storageLoading && (
+        <div className="shrink-0 uppercase tracking-[0.16em] text-[10px] text-[var(--ink-muted)]">
+          Cargando...
+        </div>
+      )}
+    </div>
+  </div>
+
+<div className="glass-panel rounded-[1.35rem] p-3.5">
+  <div className="flex items-center justify-between gap-3">
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">
+        Odds
+      </div>
+
+      {/* 🔥 Conteo principal: MES */}
+      <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">
+        {usage?.odds?.monthCount ?? 0}
+      </div>
+    </div>
+
+    {/* Estado de presupuesto */}
+    <div
+      className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${
+        usage?.odds?.withinBudget
+          ? 'border-[var(--tone-good)]/35 bg-[var(--tone-good)]/10 text-[var(--tone-good)]'
+          : 'border-[var(--tone-bad)]/35 bg-[var(--tone-bad)]/10 text-[var(--tone-bad)]'
+      }`}
+    >
+      {usage?.odds?.withinBudget ? 'EN RANGO' : 'FUERA DE RANGO'}
+    </div>
+  </div>
+
+  {/* 🔥 Detalle: HOY + LÍMITE */}
+  <div className="mt-1 text-[11px] text-[var(--ink-soft)]">
+    Hoy: {usage?.odds?.todayCount ?? 0} · / {usage?.odds?.monthlyLimit ?? 2500} mes
+  </div>
+
+  <div className="mt-2 text-[12px] text-[var(--ink-soft)]">
+    {usage?.odds?.note ?? 'Sin datos de uso de odds'}
+  </div>
+</div>
+
+  <div className="glass-panel rounded-[1.35rem] p-3.5">
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Vercel</div>
+        <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">
+          {usage?.vercel?.planMode ?? 'N/A'}
+        </div>
+      </div>
+<div className="text-right text-[11px] text-[var(--ink-soft)]">
+  {usage?.vercel?.live?.readyProductionDeployments30d != null
+    ? `${usage.vercel.live.readyProductionDeployments30d} prod listas`
+    : ''}
+</div>
+    </div>
+
+    <div className="mt-2 text-[12px] text-[var(--ink-soft)]">
+      {usage?.vercel?.note ?? 'Sin datos de Vercel'}
+    </div>
+  </div>
+</section>
           </>
         )}
       </div>

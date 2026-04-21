@@ -70,6 +70,7 @@ const PICK_COLUMNS = [
   'status',
   'result',
   'profit_units',
+  'game_day',
   'created_at',
   'updated_at'
 ].join(',');
@@ -159,6 +160,7 @@ export type PregameSnapshotRow = {
 };
 
 export type PickRecordUpsertInput = {
+  gameDay?: string | null;
   gameId: string;
   snapshotId?: string | null;
   snapshotStage?: SnapshotStage | null;
@@ -192,6 +194,7 @@ export type PickRecordUpsertInput = {
 };
 
 export type PickRow = {
+  game_day: string | null;
   id: string;
   game_id: string;
   snapshot_id: string | null;
@@ -602,6 +605,7 @@ export async function upsertPickRecord(
     .from('picks')
     .upsert(
       {
+        game_day: input.gameDay ?? null,
         game_id: input.gameId,
         snapshot_id: input.snapshotId ?? null,
         snapshot_stage: input.snapshotStage ?? null,

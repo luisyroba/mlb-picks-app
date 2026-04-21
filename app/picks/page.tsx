@@ -23,6 +23,7 @@ type PickItem = {
   finalScoreLabel: string | null;
   profitUnits: number | null;
   reason: string;
+  gameDay: string | null;
   gameDate: string | null;
   createdAt: string;
   updatedAt: string;
@@ -90,7 +91,7 @@ function filterByRange(picks: PickItem[], range: FilterRange) {
   const minMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
   return picks.filter((pick) => {
-    const key = getSlateDayKey(pick.gameDate, pick.createdAt);
+const key = getSlateDayKey(pick.gameDay, pick.gameDate, pick.createdAt);
     if (!key) return false;
 const [year, month, day] = key.split('-').map(Number);
 const ms = new Date(year, month - 1, day).getTime(); // local, sin UTC
@@ -102,7 +103,7 @@ function groupByDate(picks: PickItem[]) {
   const groups = new Map<string, PickItem[]>();
 
   for (const pick of picks) {
-    const key = getSlateDayKey(pick.gameDate, pick.createdAt) ?? 'sin-fecha';
+    const key = getSlateDayKey(pick.gameDay, pick.gameDate, pick.createdAt) ?? 'sin-fecha';
     groups.set(key, [...(groups.get(key) ?? []), pick]);
   }
 

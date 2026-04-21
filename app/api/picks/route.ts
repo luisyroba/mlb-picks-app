@@ -200,7 +200,12 @@ function buildFinalScoreLabel(
   return `${prefix}: ${awayLabel} ${parsed.awayRuns} - ${homeLabel} ${parsed.homeRuns}`;
 }
 
-function getGameDate(snapshotStartTime?: string | null, fallback?: string | null): string | null {
+function getGameDate(
+  gameDay?: string | null,
+  snapshotStartTime?: string | null,
+  fallback?: string | null
+): string | null {
+  if (gameDay) return gameDay;
   if (snapshotStartTime) return snapshotStartTime;
   return fallback ?? null;
 }
@@ -245,34 +250,39 @@ export async function GET() {
           ? snapshot.payload as Record<string, unknown>
           : null;
 
-      return {
-        id: pick.id,
-        gameId: pick.game_id,
-        gameLabel: getGameLabel(snapshotPayload, pick.game_id),
-        market: pick.market,
-        selection: pick.selection,
-        confidence: pick.confidence,
+return {
+  id: pick.id,
+  gameId: pick.game_id,
+  gameLabel: getGameLabel(snapshotPayload, pick.game_id),
+  market: pick.market,
+  selection: pick.selection,
+  confidence: pick.confidence,
 
-        executionMarket: pick.execution_market,
-        executionSelection: pick.execution_selection,
-        executionLine: pick.execution_line ?? null,
-        executionOdds: roundOdds(pick.execution_odds),
-        modelOdds: roundOdds(pick.odds),
-        displayTitle: buildExecutionTitle(pick as Record<string, unknown>),
+  executionMarket: pick.execution_market,
+  executionSelection: pick.execution_selection,
+  executionLine: pick.execution_line ?? null,
+  executionOdds: roundOdds(pick.execution_odds),
+  modelOdds: roundOdds(pick.odds),
+  displayTitle: buildExecutionTitle(pick as Record<string, unknown>),
 
-        edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
-        ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
+  edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
+  ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
 
-        status: pick.status,
-        result: pick.result,
-        finalScoreLabel: buildFinalScoreLabel(snapshotPayload, pick.result),
-        profitUnits: roundMetric(pick.profit_units),
+  status: pick.status,
+  result: pick.result,
+  finalScoreLabel: buildFinalScoreLabel(snapshotPayload, pick.result),
+  profitUnits: roundMetric(pick.profit_units),
 
-        reason: pick.execution_reason || pick.reason,
-        gameDate: getGameDate(snapshot?.start_time ?? null, pick.created_at),
-        createdAt: pick.created_at,
-        updatedAt: pick.updated_at
-      };
+  reason: pick.execution_reason || pick.reason,
+  gameDay: pick.game_day ?? null,
+  gameDate: getGameDate(
+  pick.game_day ?? null,
+  snapshot?.start_time ?? null,
+  pick.created_at
+),
+  createdAt: pick.created_at,
+  updatedAt: pick.updated_at
+};
     });
 
     picks.sort((left, right) => {

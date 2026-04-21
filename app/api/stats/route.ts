@@ -23,6 +23,12 @@ const ODDS_MONTHLY_LIMIT = 2500;
 const ODDS_REFRESH_COOLDOWN_MINUTES = Math.round(ODDS_REFRESH_COOLDOWN_MS / 60000);
 const PREMIUM_LOCK_MINUTES = 10;
 
+type StatsPickRecord = Record<string, unknown> & {
+  game_date_key: string | null;
+  game_start_time: string | null;
+  game_label: string;
+};
+
 type PremiumPickResult = {
   gameId: string;
   gameLabel: string;
@@ -172,9 +178,6 @@ function roundMetric(value?: number | null): number | null {
   return Number(value.toFixed(3));
 }
 
-function roundMb(bytes: number): number {
-  return Number((bytes / (1024 * 1024)).toFixed(3));
-}
 
 function getEffectiveImpliedProbability(pick: Record<string, unknown>): number | null {
   const executionOdds =
@@ -220,18 +223,6 @@ function getEffectiveEv(pick: Record<string, unknown>): number | null {
   }
 
   return typeof pick.ev === 'number' && Number.isFinite(pick.ev) ? pick.ev : null;
-}
-
-function normalizeDateKey(value?: string | null): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: USER_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).format(date);
 }
 
 function getPickAuditDateKey(pick: Record<string, unknown>): string | null {
@@ -556,14 +547,6 @@ function formatUsageMonthKey(date = new Date()): string {
   return `${parts.year}-${parts.month}`;
 }
 
-function estimateTableBytes(rows: unknown[]): number {
-  const rawBytes = rows.reduce<number>(
-    (total, row) => total + Buffer.byteLength(JSON.stringify(row), 'utf8'),
-    0
-  );
-  return Math.round(rawBytes * 1.3);
-}
-
 function getCounterValue(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -571,98 +554,6 @@ function getCounterValue(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
-}
-
-async function fetchTableRowCount(table: string): Promise<number> {
-  const { count, error } = await supabase
-    .from(table)
-    .select('id', { count: 'planned', head: true });
-
-  if (error) {
-    throw new Error(`Failed to count ${table}: ${error.message}`);
-  }
-
-  return count ?? 0;
-}
-
-async function buildSampledTableEstimate(config: {
-  table: string;
-  label: string;
-  sampleColumns: string;
-  orderBy: string;
-  sampleLimit: number;
-}): Promise<{ key: string; rows: number; bytes: number }> {
-  const [rows, sampleRes] = await Promise.all([
-    fetchTableRowCount(config.table),
-    supabase
-      .from(config.table)
-      .select(config.sampleColumns)
-      .order(config.orderBy, { ascending: false })
-      .limit(config.sampleLimit)
-  ]);
-
-  if (sampleRes.error) {
-    throw new Error(`Failed to sample ${config.table}: ${sampleRes.error.message}`);
-  }
-
-  const sampleRows = ((sampleRes.data ?? []) as unknown) as Record<string, unknown>[];
-  const averageBytes =
-    sampleRows.length > 0 ? estimateTableBytes(sampleRows) / sampleRows.length : 0;
-
-  return {
-    key: config.label,
-    rows,
-    bytes: Math.round(rows * averageBytes)
-  };
-}
-
-async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
-  const [gameSnapshots, marketSnapshots, oddsCache] = await Promise.all([
-    buildSampledTableEstimate({
-      table: 'game_snapshots',
-      label: 'Game snapshots',
-      sampleColumns: 'id,game_id,snapshot_stage,game_status,start_time,sport,alerts,created_at,updated_at',
-      orderBy: 'updated_at',
-      sampleLimit: 12
-    }),
-    buildSampledTableEstimate({
-      table: 'market_snapshots',
-      label: 'Market snapshots',
-      sampleColumns: 'id,game_id,event_id,sport,home_team,away_team,home_ml,away_ml,home_rl_line,home_rl_odds,away_rl_line,away_rl_odds,total_line,over_odds,under_odds,source,created_at',
-      orderBy: 'created_at',
-      sampleLimit: 24
-    }),
-    buildSampledTableEstimate({
-      table: 'odds_board_cache',
-      label: 'Odds cache',
-      sampleColumns: 'id,board_key,sport,source,created_at,updated_at',
-      orderBy: 'updated_at',
-      sampleLimit: 5
-    })
-  ]);
-
-  const breakdownRaw = [
-    { key: 'Picks', rows: allPicks.length, bytes: estimateTableBytes(allPicks) },
-    gameSnapshots,
-    marketSnapshots,
-    oddsCache
-  ];
-
-  const totalBytes = breakdownRaw.reduce((total, item) => total + item.bytes, 0);
-  const estimatedUsedMb = roundMb(totalBytes);
-  const remainingMb = Number(Math.max(0, SUPABASE_FREE_DB_LIMIT_MB - estimatedUsedMb).toFixed(3));
-
-  return {
-    estimatedUsedMb,
-    remainingMb,
-    percentUsed: Number(((estimatedUsedMb / SUPABASE_FREE_DB_LIMIT_MB) * 100).toFixed(2)),
-    breakdown: breakdownRaw.map<StorageBreakdown>((item) => ({
-      key: item.key,
-      rows: item.rows,
-      approxMb: roundMb(item.bytes)
-    })),
-    note: 'Estimacion de metadatos por tabla (excluye payloads JSONB). El uso real de PostgreSQL es mayor por indices y overhead del sistema.'
-  };
 }
 
 async function buildOddsUsageSummary() {
@@ -740,15 +631,18 @@ async function buildOddsUsageSummary() {
 
 export async function GET() {
   try {
-const [, confirmedPicks, summaryViewResult] = await Promise.all([
-  withTimeout(autoSettlePendingPicks(), 4000, undefined),
+// Corre settlement en segundo plano para no bloquear /api/stats.
+// Sigue ayudando a actualizar statuses como el premium.
+void autoSettlePendingPicks().catch(() => undefined);
+
+const [confirmedPicks, summaryViewResult] = await Promise.all([
   listConfirmedPicks(),
   supabase
     .from('pick_stats_summary')
     .select('*')
     .single()
 ]);
-    const allPicks = confirmedPicks;
+
     const summaryDb = summaryViewResult.data;
     const recentPicks = [...confirmedPicks].sort((left, right) => {
       const leftMs = new Date(String(left.created_at ?? left.updated_at ?? '')).getTime();
@@ -756,17 +650,10 @@ const [, confirmedPicks, summaryViewResult] = await Promise.all([
       return rightMs - leftMs;
     });
 
-    let totalProfitUnits = 0;
-    let gradedCount = 0;
-    let settledCount = 0;
-    let wonCount = 0;
-    let lostCount = 0;
-    let voidCount = 0;
-    let pendingCount = 0;
-    let edgeTotal = 0;
-    let edgeCount = 0;
-    let evTotal = 0;
-    let evCount = 0;
+let edgeTotal = 0;
+let edgeCount = 0;
+let evTotal = 0;
+let evCount = 0;
 
     const byMarket = new Map<string, {
       bucket: BucketSummary;
@@ -792,18 +679,8 @@ const [, confirmedPicks, summaryViewResult] = await Promise.all([
     }>();
 
     for (const pick of confirmedPicks) {
-      const profitUnits = typeof pick.profit_units === 'number' ? pick.profit_units : 0;
-      const isSettled = pick.status !== 'pending';
-      const isGraded = pick.status === 'won' || pick.status === 'lost';
-
-      totalProfitUnits += profitUnits;
-
-      if (isSettled) settledCount += 1;
-      if (isGraded) gradedCount += 1;
-      if (pick.status === 'won') wonCount += 1;
-      if (pick.status === 'lost') lostCount += 1;
-      if (pick.status === 'void') voidCount += 1;
-      if (pick.status === 'pending') pendingCount += 1;
+const profitUnits = typeof pick.profit_units === 'number' ? pick.profit_units : 0;
+const isSettled = pick.status !== 'pending';
 
       const effectiveEdge = getEffectiveEdge(pick as Record<string, unknown>);
       const effectiveEv = getEffectiveEv(pick as Record<string, unknown>);
@@ -928,89 +805,138 @@ const [, confirmedPicks, summaryViewResult] = await Promise.all([
       note: 'No se pudo estimar el uso de DB (timeout). Reintenta mas tarde.'
     };
 
-    const roi = gradedCount > 0 ? totalProfitUnits / gradedCount : null;
-    const [storage, oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
-      withTimeout(buildStorageEstimate(allPicks as Array<Record<string, unknown>>), 6000, STORAGE_TIMEOUT_FALLBACK),
-      buildOddsUsageSummary(),
-      withTimeout(buildVercelBudgetSummary(), 5000, {
-        liveUsageAvailable: false,
-        planMode: 'Guardrails Hobby / Trial',
-        hobbyLimits: {
-          deploymentsPerDay: 100,
-          maxFunctionDurationSeconds: 300,
-          fastDataTransferGb: 100,
-          runtimeLogsHours: 1,
-          staticFileUploadsMb: 100,
-          diskSizeGb: 23
-        },
-        note: 'No pude leer stats live de Vercel a tiempo. Se muestran guardrails estáticos.',
-        live: null
-      }),
-      getPregameSnapshotsByIds(
-        recentPicks
-          .map((pick) => pick.snapshot_id ?? '')
-          .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
-      ).catch(() => new Map())
-    ]);
-    const recentWithSnapshots = recentPicks.map((pick) => {
-      const snapshot = pick.snapshot_id ? snapshotsById.get(pick.snapshot_id) ?? null : null;
-      const snapshotPayload =
-        snapshot?.payload && typeof snapshot.payload === 'object'
-          ? (snapshot.payload as Record<string, unknown>)
-          : null;
-      const gameDate = getGameDate(snapshot?.start_time ?? null, pick.created_at);
+const [oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
+  // Uso de Odds API: esto sí es parte útil del stats principal.
+  buildOddsUsageSummary(),
 
-      return {
-        pick,
-        snapshot,
-        snapshotPayload,
-        gameDate
-      };
-    });
-    const pickRecords = recentWithSnapshots.map(({ pick, snapshotPayload, gameDate }) => ({
+  // Presupuesto / límites de Vercel: también útil para el panel principal.
+  withTimeout(buildVercelBudgetSummary(), 5000, {
+    liveUsageAvailable: false,
+    planMode: 'Guardrails Hobby / Trial',
+    hobbyLimits: {
+      deploymentsPerDay: 100,
+      maxFunctionDurationSeconds: 300,
+      fastDataTransferGb: 100,
+      runtimeLogsHours: 1,
+      staticFileUploadsMb: 100,
+      diskSizeGb: 23
+    },
+    note: 'No pude leer stats live de Vercel a tiempo. Se muestran guardrails estáticos.',
+    live: null
+  }),
+
+  // Snapshots recientes para premium/top 3/recent:
+  // limitamos a 120 para no cargar todo el historial.
+  withTimeout(
+    getPregameSnapshotsByIds(
+      recentPicks
+        .slice(0, 120)
+        .map((pick) => pick.snapshot_id ?? '')
+        .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
+    ).catch(() => new Map()),
+    4000,
+    new Map()
+  )
+]);
+
+// Storage ya NO se calcula dentro del endpoint principal.
+// Dejamos un placeholder liviano para que el frontend pueda mostrar
+// que esa tarjeta ahora se carga por separado desde /api/stats/storage.
+const storage = {
+  ...STORAGE_TIMEOUT_FALLBACK,
+  note: 'Storage se carga por separado desde /api/stats/storage.'
+};
+
+
+   const recentWithSnapshots = recentPicks.map((pick) => {
+  const snapshot = pick.snapshot_id ? snapshotsById.get(pick.snapshot_id) ?? null : null;
+  const snapshotPayload =
+    snapshot?.payload && typeof snapshot.payload === 'object'
+      ? (snapshot.payload as Record<string, unknown>)
+      : null;
+
+  const gameDate = getGameDate(
+    snapshot?.start_time ??
+      (typeof (pick as { game_date?: unknown }).game_date === 'string'
+        ? (pick as { game_date?: string }).game_date
+        : null) ??
+      (typeof (pick as { gameDate?: unknown }).gameDate === 'string'
+        ? (pick as { gameDate?: string }).gameDate
+        : null) ??
+      (typeof (pick as { event_start_time?: unknown }).event_start_time === 'string'
+        ? (pick as { event_start_time?: string }).event_start_time
+        : null),
+    null
+  );
+
+  return {
+    pick,
+    snapshot,
+    snapshotPayload,
+    gameDate
+  };
+});
+
+const pickRecords: StatsPickRecord[] = recentWithSnapshots.map(
+  ({ pick, snapshotPayload, gameDate, snapshot }) =>
+    ({
       ...(pick as Record<string, unknown>),
-      game_date_key: getSlateDayKey(gameDate, pick.created_at),
+      game_date_key: getSlateDayKey(pick.game_day ?? null, gameDate, pick.created_at),
+      game_start_time:
+        typeof snapshot?.start_time === 'string'
+          ? snapshot.start_time
+          : typeof gameDate === 'string'
+            ? gameDate
+            : null,
       game_label: getGameLabel(snapshotPayload, String(pick.game_id ?? ''))
-    }));
-  
+    }) as StatsPickRecord
+);
+
 const trend = buildTrendSeries(pickRecords);
 
-    const solidPick = buildSolidPickAudit(
-      pickRecords
+const solidPick = buildSolidPickAudit(pickRecords);
+
+const todayDateKey = formatUsageDateKey();
+
+const rawTodayCandidates = pickRecords
+  .filter((pick) => {
+    return (
+      String(pick.confidence ?? '') === 'A' &&
+      String(pick.status ?? '') === 'pending' &&
+      String(pick.game_date_key ?? '') === todayDateKey
+    );
+  })
+  .map((pick) => {
+    const estimatedProbability =
+      typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
+        ? roundMetric(pick.estimated_probability)
+        : null;
+
+    const impliedProbability = roundMetric(
+      getEffectiveImpliedProbability(pick as Record<string, unknown>)
     );
 
-    const todayDateKey = formatUsageDateKey();
-    const rawTodayCandidates = recentWithSnapshots
-      .filter(({ pick, gameDate }) => {
-        const key = normalizeDateKey(gameDate);
-        return String(pick.confidence) === 'A' && String(pick.status) === 'pending' && key === todayDateKey;
-      })
-      .map(({ pick, snapshotPayload, snapshot }) => {
-        const estimatedProbability =
-          typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
-            ? roundMetric(pick.estimated_probability)
-            : null;
-        const impliedProbability = roundMetric(getEffectiveImpliedProbability(pick as Record<string, unknown>));
-        return {
-          gameId: String(pick.game_id ?? ''),
-          gameLabel: getGameLabel(snapshotPayload, String(pick.game_id ?? '')),
-          market: String(pick.execution_market || pick.market || 'UNKNOWN'),
-          selection: buildExecutionTitle(pick as Record<string, unknown>),
-          confidence: String(pick.confidence ?? ''),
-          score: getSolidPickScore(pick as Record<string, unknown>),
-          edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
-          ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
-          estimatedProbability,
-          impliedProbability,
-          executionOdds:
-            typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
-              ? pick.execution_odds
-              : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
-                ? pick.odds
-                : null,
-          gameStartTime: snapshot?.start_time ?? null
-        };
-      });
+    return {
+      gameId: String(pick.game_id ?? ''),
+      gameLabel: String(pick.game_label ?? String(pick.game_id ?? '')),
+      market: String(pick.execution_market || pick.market || 'UNKNOWN'),
+      selection: buildExecutionTitle(pick as Record<string, unknown>),
+      confidence: String(pick.confidence ?? ''),
+      score: getSolidPickScore(pick as Record<string, unknown>),
+      edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
+      ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
+      estimatedProbability,
+      impliedProbability,
+      executionOdds:
+        typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
+          ? pick.execution_odds
+          : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
+            ? pick.odds
+            : null,
+      gameStartTime:
+        typeof pick.game_start_time === 'string' ? pick.game_start_time : null
+    };
+  });
 
     // Group by dedupKey — highest score = current, second = prev (for delta display)
     const dedupGroups = new Map<string, typeof rawTodayCandidates>();

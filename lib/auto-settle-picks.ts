@@ -914,7 +914,24 @@ async function shouldRevertSettledPick(pick: PickRow): Promise<boolean> {
     );
     const abstractStatus = String(feed.gameData?.status?.abstractGameState ?? '');
     const detailedStatus = String(feed.gameData?.status?.detailedState ?? '');
-    return !(isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus));
+
+    if (!(isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus))) {
+      return true;
+    }
+
+    const currentRuns = getFinalRuns(feed);
+    if (currentRuns) {
+      const scoreMatch = /AUTO_(?:WON|LOST|VOID)\s+\S+\s+(\d+)-(\d+)$/i.exec(String(pick.result ?? ''));
+      if (scoreMatch) {
+        const storedAway = Number(scoreMatch[1]);
+        const storedHome = Number(scoreMatch[2]);
+        if (storedAway !== currentRuns.away || storedHome !== currentRuns.home) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   const feed = await fetchMlbJson<MlbLiveFeedResponse>(

@@ -115,6 +115,25 @@ function parseExecutionRecommendation(
   };
 }
 
+function deriveGameDay(startTime?: string | null, fallback?: string | null): string | null {
+  if (startTime) {
+    const normalized = startTime.includes('T')
+  ? startTime
+  : startTime.replace(' ', 'T');
+
+const date = new Date(normalized);
+    if (Number.isFinite(date.getTime())) {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Santiago',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(date);
+    }
+  }
+  return fallback ?? null;
+}
+
 function buildFallbackRecommendation(
   pick: Awaited<ReturnType<typeof getLatestPickForGame>>
 ): ExecutionRecommendation | null {
@@ -335,6 +354,7 @@ export async function POST(req: NextRequest) {
 
       await upsertPickRecord({
         gameId,
+        gameDay: deriveGameDay(snapshot?.start_time, existingPick?.game_day),
         snapshotId: snapshot?.id ?? existingPick?.snapshot_id ?? null,
         snapshotStage:
           snapshot?.snapshot_stage === 'open' ||
