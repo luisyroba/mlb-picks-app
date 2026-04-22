@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
+  getLatestMarketSnapshotsByGameIds,
   getPregameSnapshotsByIds,
   getOddsBoardCache,
   listConfirmedPicks,
@@ -8,6 +9,7 @@ import {
   closePremiumDailyLock,
   supabase
 } from '@/lib/db';
+import { resolveMatchupLabel } from '@/lib/matchup-label';
 import { expectedValue, impliedProbability } from '@/lib/probability-model';
 import {
   ODDS_REFRESH_COOLDOWN_MS,
@@ -144,6 +146,17 @@ type SlicePremiumSummary = {
   currentStreak: { type: 'won' | 'lost'; count: number } | null;
 };
 
+type PremiumRankSummary = {
+  rank: 1 | 2 | 3;
+  summary: SlicePremiumSummary;
+};
+
+type PremiumRankHistory = {
+  rank: 1 | 2 | 3;
+  summary: SlicePremiumSummary;
+  history: SolidPickPoint[];
+};
+
 type DailyPremiumTopPick = {
   gameId: string;
   gameLabel: string;
@@ -169,6 +182,8 @@ type DailySummaryItem = {
 
 type SlicePremiumView = {
   summary: SlicePremiumSummary;
+  rankSummaries: PremiumRankSummary[];
+  rankHistories: PremiumRankHistory[];
   history: SolidPickPoint[];
   currentPick: PremiumPickResult | null;
   todayRanking: TodayRankingItem[];
@@ -318,46 +333,6 @@ function buildExecutionTitle(pick: Record<string, unknown>): string {
   }
 
   return selection;
-}
-
-function getGameLabel(snapshotPayload: Record<string, unknown> | null, gameId: string): string {
-  const espnGame =
-    snapshotPayload?.espnGame && typeof snapshotPayload.espnGame === 'object'
-      ? (snapshotPayload.espnGame as Record<string, unknown>)
-      : null;
-
-  const shortName = typeof espnGame?.shortName === 'string' ? espnGame.shortName : null;
-  if (shortName) return shortName;
-
-  const engineGame =
-    snapshotPayload?.engineGame && typeof snapshotPayload.engineGame === 'object'
-      ? (snapshotPayload.engineGame as Record<string, unknown>)
-      : null;
-  const homeTeam =
-    engineGame?.homeTeam && typeof engineGame.homeTeam === 'object'
-      ? (engineGame.homeTeam as Record<string, unknown>)
-      : null;
-  const awayTeam =
-    engineGame?.awayTeam && typeof engineGame.awayTeam === 'object'
-      ? (engineGame.awayTeam as Record<string, unknown>)
-      : null;
-  const homeCore =
-    homeTeam?.core && typeof homeTeam.core === 'object'
-      ? (homeTeam.core as Record<string, unknown>)
-      : null;
-  const awayCore =
-    awayTeam?.core && typeof awayTeam.core === 'object'
-      ? (awayTeam.core as Record<string, unknown>)
-      : null;
-
-  const homeName = typeof homeCore?.teamName === 'string' ? homeCore.teamName : null;
-  const awayName = typeof awayCore?.teamName === 'string' ? awayCore.teamName : null;
-
-  if (awayName && homeName) {
-    return `${awayName} @ ${homeName}`;
-  }
-
-  return gameId;
 }
 
 function roundMetric(value?: number | null): number | null {
@@ -568,54 +543,47 @@ function getSolidPickScore(pick: Record<string, unknown>): number {
   return Number(score.toFixed(3));
 }
 
-function buildSolidPickAuditRange(
-  picks: Array<Record<string, unknown>>,
-  auditStartDate: string | null
-) {
-  const grouped = new Map<string, SolidPickPoint>();
-
-  for (const pick of picks) {
-    if (pick.confidence !== 'A') continue;
-
-    const key = getPickAuditDateKey(pick);
-    if (!key || (auditStartDate !== null && key < auditStartDate)) continue;
-
-    const candidate: SolidPickPoint = {
-      date: key,
-      gameId: String(pick.game_id ?? ''),
-      gameLabel: typeof pick.game_label === 'string' ? pick.game_label : String(pick.game_id ?? ''),
-      market: String(pick.execution_market || pick.market || 'UNKNOWN'),
-      selection: String(pick.execution_selection || pick.selection || 'NO BET'),
-      confidence: String(pick.confidence ?? 'PASS'),
-      status: String(pick.status ?? 'pending'),
-      score: getSolidPickScore(pick),
-      edge: roundMetric(getEffectiveEdge(pick)),
-      ev: roundMetric(getEffectiveEv(pick)),
-      estimatedProbability:
-        typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
-          ? roundMetric(pick.estimated_probability)
+function buildSolidPickCandidate(pick: Record<string, unknown>, dateKey: string): SolidPickPoint {
+  return {
+    date: dateKey,
+    gameId: String(pick.game_id ?? ''),
+    gameLabel: typeof pick.game_label === 'string' ? pick.game_label : String(pick.game_id ?? ''),
+    market: String(pick.execution_market || pick.market || 'UNKNOWN'),
+    selection: String(pick.execution_selection || pick.selection || 'NO BET'),
+    confidence: String(pick.confidence ?? 'PASS'),
+    status: String(pick.status ?? 'pending'),
+    score: getSolidPickScore(pick),
+    edge: roundMetric(getEffectiveEdge(pick)),
+    ev: roundMetric(getEffectiveEv(pick)),
+    estimatedProbability:
+      typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
+        ? roundMetric(pick.estimated_probability)
+        : null,
+    executionOdds:
+      typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
+        ? pick.execution_odds
+        : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
+          ? pick.odds
           : null,
-      executionOdds:
-        typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
-          ? pick.execution_odds
-          : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
-            ? pick.odds
-            : null,
-      profitUnits:
-        typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
-          ? roundMetric(pick.profit_units)
-          : null,
-      createdAt: String(pick.created_at ?? ''),
-      updatedAt: String(pick.updated_at ?? '')
-    };
+    profitUnits:
+      typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+        ? roundMetric(pick.profit_units)
+        : null,
+    createdAt: String(pick.created_at ?? ''),
+    updatedAt: String(pick.updated_at ?? '')
+  };
+}
 
-    const current = grouped.get(key);
-    if (!current || candidate.score > current.score) {
-      grouped.set(key, candidate);
-    }
-  }
+function compareSolidPickCandidates(left: SolidPickPoint, right: SolidPickPoint) {
+  return (
+    right.score - left.score ||
+    (right.edge ?? 0) - (left.edge ?? 0) ||
+    (right.ev ?? 0) - (left.ev ?? 0) ||
+    left.gameId.localeCompare(right.gameId)
+  );
+}
 
-  const history = [...grouped.values()].sort((left, right) => left.date.localeCompare(right.date));
+function summarizeSolidPickHistory(history: SolidPickPoint[]) {
   const descendingHistory = [...history].reverse();
   const activeToday = descendingHistory.find((item) => item.status === 'pending') ?? null;
 
@@ -668,6 +636,38 @@ function buildSolidPickAuditRange(
     },
     history: settledHistory
   };
+}
+
+function buildSolidPickAuditRange(
+  picks: Array<Record<string, unknown>>,
+  auditStartDate: string | null,
+  rank: number = 1
+) {
+  const grouped = new Map<string, SolidPickPoint[]>();
+
+  for (const pick of picks) {
+    if (pick.confidence !== 'A') continue;
+
+    const key = getPickAuditDateKey(pick);
+    if (!key || (auditStartDate !== null && key < auditStartDate)) continue;
+
+    const candidate = buildSolidPickCandidate(pick, key);
+    const current = grouped.get(key) ?? [];
+    current.push(candidate);
+    grouped.set(key, current);
+  }
+
+  const history = [...grouped.entries()]
+    .map(([dateKey, candidates]) => {
+      const sorted = [...candidates].sort(compareSolidPickCandidates);
+      const ranked = sorted[rank - 1] ?? null;
+      return ranked ? { dateKey, ranked } : null;
+    })
+    .filter((item): item is { dateKey: string; ranked: SolidPickPoint } => Boolean(item))
+    .map((item) => item.ranked)
+    .sort((left, right) => left.date.localeCompare(right.date));
+
+  return summarizeSolidPickHistory(history);
 }
 
 function buildSolidPickAudit(
@@ -1006,6 +1006,18 @@ function buildDisplaySlice(
   const summary = buildSliceSummary(picks);
   const buckets = buildSliceBuckets(picks);
   const premiumAudit = buildSolidPickAuditRange(picks, null);
+  const rankAudits: PremiumRankHistory[] = ([1, 2, 3] as const).map((rank) => {
+    const audit = buildSolidPickAuditRange(picks, null, rank);
+    return {
+      rank,
+      summary: audit.summary,
+      history: audit.history
+    };
+  });
+  const rankSummaries: PremiumRankSummary[] = ([1, 2, 3] as const).map((rank) => ({
+    rank,
+    summary: rankAudits.find((entry) => entry.rank === rank)?.summary ?? premiumAudit.summary
+  }));
 
   return {
     key: options.key,
@@ -1020,6 +1032,8 @@ function buildDisplaySlice(
     trend: buildTrendSeries(picks),
     premium: {
       summary: premiumAudit.summary,
+      rankSummaries,
+      rankHistories: rankAudits,
       history: premiumAudit.history,
       currentPick: options.currentPremiumContext?.premiumPick ?? null,
       todayRanking: options.currentPremiumContext?.todayRanking ?? [],
@@ -1346,7 +1360,7 @@ const isSettled = pick.status !== 'pending';
       note: 'No se pudo estimar el uso de DB (timeout). Reintenta mas tarde.'
     };
 
-const [oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
+const [oddsUsage, vercelUsage, snapshotsById, marketSnapshotsByGameId] = await Promise.all([
   // Uso de Odds API: esto sí es parte útil del stats principal.
   buildOddsUsageSummary(),
 
@@ -1374,6 +1388,16 @@ const [oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
         .slice(0, RECENT_UI_LIMIT)
         .map((pick) => pick.snapshot_id ?? '')
         .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
+    ).catch(() => new Map()),
+    4000,
+    new Map()
+  ),
+
+  withTimeout(
+    getLatestMarketSnapshotsByGameIds(
+      recentPicks
+        .map((pick) => pick.game_id ?? '')
+        .filter((gameId): gameId is string => Boolean(gameId))
     ).catch(() => new Map()),
     4000,
     new Map()
@@ -1429,7 +1453,11 @@ const pickRecords: StatsPickRecord[] = recentWithSnapshots.map(
           : typeof gameDate === 'string'
             ? gameDate
             : null,
-      game_label: getGameLabel(snapshotPayload, String(pick.game_id ?? ''))
+      game_label: resolveMatchupLabel({
+        snapshotPayload,
+        marketSnapshot: marketSnapshotsByGameId.get(String(pick.game_id ?? '')) ?? null,
+        gameId: String(pick.game_id ?? '')
+      })
     }) as StatsPickRecord
 );
 
@@ -1564,9 +1592,17 @@ const rawTodayCandidates = pickRecords
       // Day closed — locked game settled; don't surface a new pick or ranking
     } else if (isLocked && lockPayload) {
       const p = lockPayload as Record<string, unknown>;
+      const lockedGameId = String(p.gameId ?? '');
+      const lockedPickRecord = pickRecords.find((pick) => String(pick.game_id ?? '') === lockedGameId);
       premiumPick = {
-        gameId: String(p.gameId ?? ''),
-        gameLabel: String(p.gameLabel ?? ''),
+        gameId: lockedGameId,
+        gameLabel:
+          lockedPickRecord?.game_label ??
+          resolveMatchupLabel({
+            fallbackGameLabel: String(p.gameLabel ?? ''),
+            marketSnapshot: marketSnapshotsByGameId.get(lockedGameId) ?? null,
+            gameId: lockedGameId
+          }),
         market: String(p.marketType ?? p.market ?? ''),
         selection: String(p.selection ?? ''),
         confidence: String(p.confidence ?? ''),
@@ -1623,7 +1659,11 @@ const rawTodayCandidates = pickRecords
     const recent = recentWithSnapshots.slice(0, RECENT_UI_LIMIT).map(({ pick, snapshotPayload, gameDate }) => ({
       id: pick.id,
       gameId: pick.game_id,
-      gameLabel: getGameLabel(snapshotPayload, pick.game_id),
+      gameLabel: resolveMatchupLabel({
+        snapshotPayload,
+        marketSnapshot: marketSnapshotsByGameId.get(String(pick.game_id ?? '')) ?? null,
+        gameId: String(pick.game_id ?? '')
+      }),
       displayTitle: buildExecutionTitle(pick as Record<string, unknown>),
       market: pick.execution_market || pick.market,
       selection: pick.execution_selection || pick.selection,
@@ -1762,6 +1802,21 @@ summary: {
       },
       solidPick: {
         ...solidPick,
+        rankSummaries: ([1, 2, 3] as const).map((rank) => {
+          const audit = buildSolidPickAuditRange(pickRecords, null, rank);
+          return {
+            rank,
+            summary: audit.summary
+          };
+        }),
+        rankHistories: ([1, 2, 3] as const).map((rank) => {
+          const audit = buildSolidPickAuditRange(pickRecords, null, rank);
+          return {
+            rank,
+            summary: audit.summary,
+            history: audit.history
+          };
+        }),
         todayRanking: premiumClosed ? [] : solidTodayRanking,
         premiumPick,
         isLocked,

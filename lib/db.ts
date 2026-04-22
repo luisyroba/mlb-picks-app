@@ -441,6 +441,38 @@ export async function getLatestMarketSnapshot(
   return assertSingleRow<MarketSnapshotRow>(data, 'market snapshot');
 }
 
+export async function getLatestMarketSnapshotsByGameIds(
+  gameIds: string[]
+): Promise<Map<string, MarketSnapshotRow>> {
+  const uniqueIds = uniqueNonEmpty(gameIds);
+  if (!uniqueIds.length) {
+    return new Map();
+  }
+
+  const { data, error } = await supabase
+    .from('market_snapshots')
+    .select(MARKET_SNAPSHOT_COLUMNS)
+    .in('game_id', uniqueIds)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch market snapshots for games: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<MarketSnapshotRow>(data, 'market snapshot')
+    : [];
+  const latestByGameId = new Map<string, MarketSnapshotRow>();
+
+  for (const row of rows) {
+    if (!latestByGameId.has(row.game_id)) {
+      latestByGameId.set(row.game_id, row);
+    }
+  }
+
+  return latestByGameId;
+}
+
 export async function getMarketSnapshotWindow(
   gameId: string
 ): Promise<{

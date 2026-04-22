@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -114,6 +114,35 @@ type DailySummaryItem = {
   premiumTopPick: DailyPremiumTopPick | null;
 };
 
+type PremiumRankSummary = {
+  rank: 1 | 2 | 3;
+  summary: {
+    total: number;
+    settled: number;
+    won: number;
+    lost: number;
+    void: number;
+    pending: number;
+    winRate: number | null;
+    currentStreak: { type: 'won' | 'lost'; count: number } | null;
+  };
+};
+
+type PremiumRankHistory = {
+  rank: 1 | 2 | 3;
+  summary: {
+    total: number;
+    settled: number;
+    won: number;
+    lost: number;
+    void: number;
+    pending: number;
+    winRate: number | null;
+    currentStreak: { type: 'won' | 'lost'; count: number } | null;
+  };
+  history: SolidPickHistoryItem[];
+};
+
 type SegmentedPremiumView = {
   summary: {
     total: number;
@@ -125,6 +154,8 @@ type SegmentedPremiumView = {
     winRate: number | null;
     currentStreak: { type: 'won' | 'lost'; count: number } | null;
   };
+  rankSummaries: PremiumRankSummary[];
+  rankHistories: PremiumRankHistory[];
   history: SolidPickHistoryItem[];
   currentPick: PremiumPanelPick | null;
   todayRanking: {
@@ -220,6 +251,8 @@ type StatsResponse = {
       winRate: number | null;
       currentStreak: { type: 'won' | 'lost'; count: number } | null;
     };
+    rankSummaries?: PremiumRankSummary[];
+    rankHistories?: PremiumRankHistory[];
     history: SolidPickHistoryItem[];
     todayRanking?: {
       gameId: string;
@@ -423,6 +456,50 @@ function resolveMatchupLabel(
 function formatStreak(streak?: { type: 'won' | 'lost'; count: number } | null) {
   if (!streak) return '-';
   return `${streak.type === 'won' ? 'W' : 'L'}${streak.count}`;
+}
+
+function getRecentDateKey(item: RecentItem) {
+  const date = parseUiDate(item.gameDate ?? item.createdAt);
+  if (!date) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: USER_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(date);
+}
+
+function getRecentMode(item: RecentItem): 'testing' | 'live' | null {
+  const dateKey = getRecentDateKey(item);
+  if (!dateKey) return null;
+  return dateKey >= LIVE_STATS_CUTOFF_DATE_KEY ? 'live' : 'testing';
+}
+
+function getPremiumRankFrame(rank: 1 | 2 | 3) {
+  if (rank === 1) {
+    return {
+      shell: 'border-[#ead18f]/55 bg-[linear-gradient(145deg,rgba(255,248,224,0.96),rgba(255,255,255,0.98))] shadow-[0_18px_42px_rgba(160,126,50,0.14)]',
+      hero: 'bg-[linear-gradient(135deg,#7f5a11,#d4a942)] text-white shadow-[0_12px_24px_rgba(127,90,17,0.2)]',
+      card: 'border-[#efe1b8] bg-[rgba(255,255,255,0.74)]',
+      label: 'text-[#9b771c]'
+    };
+  }
+
+  if (rank === 2) {
+    return {
+      shell: 'border-[#d6dbe4]/70 bg-[linear-gradient(145deg,rgba(243,246,251,0.96),rgba(255,255,255,0.98))] shadow-[0_18px_42px_rgba(122,134,154,0.12)]',
+      hero: 'bg-[linear-gradient(135deg,#7d8797,#dce2eb)] text-white shadow-[0_12px_24px_rgba(122,134,154,0.18)]',
+      card: 'border-[#d9dee7] bg-[rgba(255,255,255,0.78)]',
+      label: 'text-[#758093]'
+    };
+  }
+
+  return {
+    shell: 'border-[#dbc4aa]/70 bg-[linear-gradient(145deg,rgba(247,239,232,0.96),rgba(255,255,255,0.98))] shadow-[0_18px_42px_rgba(150,110,76,0.12)]',
+    hero: 'bg-[linear-gradient(135deg,#8a5a37,#c78f66)] text-white shadow-[0_12px_24px_rgba(138,90,55,0.18)]',
+    card: 'border-[#e2cdb8] bg-[rgba(255,255,255,0.78)]',
+    label: 'text-[#8e6444]'
+  };
 }
 
 function pillThemeStyle(theme: {
@@ -725,7 +802,7 @@ if (!chartPoints.length) {
                 {formatUnits(pt.cumulativeProfitUnits)}
               </text>
               <text x={boxX + 10} y={boxY + 58} fontSize="12" fill="rgba(9,28,57,0.45)">
-                {`ROI ${formatMetric(pt.cumulativeRoi)}  ·  WR ${formatRate(pt.cumulativeWinRate)}`}
+                {`ROI ${formatMetric(pt.cumulativeRoi)} · WR ${formatRate(pt.cumulativeWinRate)}`}
               </text>
               <text x={boxX + 10} y={boxY + 73} fontSize="12" fill="rgba(9,28,57,0.35)">
                 {`${pt.graded ?? 0} graded · ${pt.won ?? 0}W ${pt.lost ?? 0}L`}
@@ -871,6 +948,8 @@ const premiumView = selectedView?.premium ?? {
     winRate: null,
     currentStreak: null
   },
+  rankSummaries: [] as PremiumRankSummary[],
+  rankHistories: [] as PremiumRankHistory[],
   history: [] as SolidPickHistoryItem[],
   currentPick: null,
   todayRanking: [],
@@ -892,8 +971,8 @@ const selectedScopeDescription =
 const isLiveCurrentPeriod =
   selectedDataMode === 'live' && Boolean(selectedLiveView?.isCurrent);
 
-// DB card: si ya llegó el endpoint separado, usamos ese.
-// Si todavía no llega, usamos usage.db del payload principal.
+// DB card: si ya llegÃ³ el endpoint separado, usamos ese.
+// Si todavÃ­a no llega, usamos usage.db del payload principal.
 const dbUsage: DbUsage | null = storageData ?? usage?.db ?? null;
 
 const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
@@ -922,18 +1001,55 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
 
   return null;
 }, [isLiveCurrentPeriod, premiumView.currentPick, premiumView.history, selectedDataMode]);
-  const visibleSolidHistory = useMemo(
-    () => premiumView.history.slice(0, solidHistoryVisibleCount),
-    [premiumView.history, solidHistoryVisibleCount]
-  );
-  const hasMoreSolidHistory = premiumView.history.length > visibleSolidHistory.length;
-  const solidTotalProfit = useMemo(
-    () => premiumView.history.reduce((sum, item) => sum + (item.profitUnits ?? 0), 0),
-    [premiumView.history]
-  );
   const todayTopPicks = useMemo(
     () => premiumView.todayRanking.slice(0, 3),
     [premiumView.todayRanking]
+  );
+  const premiumRankCards = useMemo(() => {
+    const rankMap = new Map(
+      premiumView.rankSummaries.map((entry) => [entry.rank, entry.summary] as const)
+    );
+
+    return ([1, 2, 3] as const).map((rank) => ({
+      rank,
+      summary:
+        premiumView.rankHistories.find((entry) => entry.rank === rank)?.summary ??
+        rankMap.get(rank) ??
+        (rank === 1
+          ? premiumView.summary
+          : {
+              total: 0,
+              settled: 0,
+              won: 0,
+              lost: 0,
+              void: 0,
+              pending: 0,
+              winRate: null,
+              currentStreak: null
+            }),
+      profit:
+        premiumView.rankHistories
+          .find((entry) => entry.rank === rank)
+          ?.history.reduce((sum, item) => sum + (item.profitUnits ?? 0), 0) ?? 0
+    }));
+  }, [premiumView.rankHistories, premiumView.rankSummaries, premiumView.summary]);
+  const premiumHistoryColumns = useMemo(() => {
+    return ([1, 2, 3] as const).map((rank) => {
+      const entry = premiumView.rankHistories.find((item) => item.rank === rank);
+      return {
+        rank,
+        summary: entry?.summary ?? null,
+        items: (entry?.history ?? []).slice(0, solidHistoryVisibleCount)
+      };
+    });
+  }, [premiumView.rankHistories, solidHistoryVisibleCount]);
+  const hasMoreSolidHistory = useMemo(
+    () =>
+      premiumHistoryColumns.some((column) => {
+        const total = premiumView.rankHistories.find((entry) => entry.rank === column.rank)?.history.length ?? 0;
+        return total > column.items.length;
+      }),
+    [premiumHistoryColumns, premiumView.rankHistories]
   );
   const premiumSettlementInfo =
     isLiveCurrentPeriod &&
@@ -941,18 +1057,6 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
     activeSolidPick?.gameId === currentPremiumPick.gameId
       ? activeSolidPick
       : null;
-  const premiumCardLabel =
-    selectedDataMode === 'testing'
-      ? 'Premium testing'
-      : isLiveCurrentPeriod
-        ? 'Pick solido de hoy'
-        : 'Premium del periodo';
-  const premiumEmptyMessage =
-    selectedDataMode === 'testing'
-      ? 'No hay premium testing registrado antes del corte.'
-      : isLiveCurrentPeriod
-        ? 'Se mostrara aqui cuando exista un premium live activo para el periodo.'
-        : 'No hay premium live persistido para este periodo.';
   const rankingEmptyMessage =
     selectedDataMode === 'testing'
       ? 'Testing no tiene top 3 diario persistido; se muestra solo el historial premium.'
@@ -1058,7 +1162,7 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
 
         {!loading && !error && summary && usage && (
           <>
-            {/* Row 2 — Profit acumulado + Sistema premium */}
+            {/* Row 2 â€” Profit acumulado + Sistema premium */}
             <section className="mt-3 grid gap-3 xl:grid-cols-2">
 
               {/* Profit acumulado */}
@@ -1122,88 +1226,34 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                   <div className="text-[10px] uppercase tracking-[0.24em] text-[#9b771c]">{selectedScopeLabel}</div>
                   <h3 className="mt-0.5 font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Sistema premium</h3>
 
-                  {/* Metrics 4-col: Record / WR / Profit / Racha */}
-                  <div className="mt-3 grid grid-cols-4 gap-2">
-                    <div className="rounded-[1.1rem] bg-[linear-gradient(135deg,#7f5a11,#d4a942)] p-2.5 text-white shadow-[0_12px_24px_rgba(127,90,17,0.2)]">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-white/60">Record</div>
-                      <div className="mt-1 text-lg font-semibold">{premiumView.summary.won}/{premiumView.summary.total}</div>
-                    </div>
-                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">WR</div>
-                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatRate(premiumView.summary.winRate)}</div>
-                    </div>
-                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Profit</div>
-                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatUnits(solidTotalProfit)}</div>
-                    </div>
-                    <div className="rounded-[1.1rem] border border-[#efe1b8] bg-[rgba(255,255,255,0.74)] p-2.5">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Racha</div>
-                      <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatStreak(premiumView.summary.currentStreak)}</div>
-                    </div>
-                  </div>
+                  <div className="mt-3 space-y-3">
+                    {premiumRankCards.map((entry) => {
+                      const frame = getPremiumRankFrame(entry.rank);
 
-                  {/* Pick de hoy */}
-                  <div className="mt-3 rounded-[1.1rem] border border-[#ead18f] bg-[linear-gradient(135deg,rgba(255,248,224,0.92),rgba(255,255,255,0.9))] p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">{premiumCardLabel}</div>
-                      {selectedDataMode === 'live' && premiumView.isLocked && (
-                        <span className="rounded-full border border-[#ead18f]/70 bg-[rgba(255,248,224,0.9)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8a6115]">Lock</span>
-                      )}
-                    </div>
-                    {premiumView.isClosed && !currentPremiumPick ? (
-                      <>
-                        <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">Pick premium del día finalizado</div>
-                        <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
-                          El premium live de hoy ya fue resuelto y no se abre un reemplazo nuevo.
-                        </div>
-                      </>
-                    ) : currentPremiumPick ? (() => {
                       return (
-                        <>
-                          <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">
-                            {currentPremiumPick.market} / {currentPremiumPick.selection}
-                          </div>
-                          <div className="mt-0.5 text-xs text-[var(--ink-soft)]">
-                            {resolveMatchupLabel(currentPremiumPick.gameId, currentPremiumPick.gameLabel, stats?.recent)} · {currentPremiumPick.confidence}
-</div>
-                          <div className="mt-2 grid grid-cols-4 gap-1.5">
-                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Cuota</div>
-                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatOdds(currentPremiumPick.executionOdds)}</div>
+                        <div key={`premium-rank-card-${entry.rank}`} className={`rounded-[1.2rem] border p-3 ${frame.shell}`}>
+                          <div className={`text-[10px] uppercase tracking-[0.18em] ${frame.label}`}>Top #{entry.rank}</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
+                            <div className={`rounded-[1.05rem] p-2.5 ${frame.hero}`}>
+                              <div className="text-[10px] uppercase tracking-[0.16em] text-current/60">Record</div>
+                              <div className="mt-1 text-lg font-semibold">{entry.summary.won}/{entry.summary.total}</div>
                             </div>
-                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Score</div>
-                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(currentPremiumPick.score)}</div>
+                            <div className={`rounded-[1.05rem] border p-2.5 ${frame.card}`}>
+                              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">WR</div>
+                              <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatRate(entry.summary.winRate)}</div>
                             </div>
-                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Edge</div>
-                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">{formatMetric(currentPremiumPick.edge)}</div>
+                            <div className={`rounded-[1.05rem] border p-2.5 ${frame.card}`}>
+                              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Profit</div>
+                              <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatUnits(entry.profit)}</div>
                             </div>
-                            <div className="rounded-[0.8rem] bg-white/70 px-2 py-1.5">
-                              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">Estado</div>
-                              <div className="mt-0.5 text-sm font-semibold text-[var(--ink-strong)]">
-                                {premiumSettlementInfo?.settledStatus?.toUpperCase() ?? 'PENDING'}
-                              </div>
-                              {premiumSettlementInfo?.settledStatus && typeof premiumSettlementInfo.profitUnits === 'number' && (
-                                <div className="text-[10px] text-[var(--ink-soft)]">{formatUnits(premiumSettlementInfo.profitUnits)}</div>
-                              )}
+                            <div className={`rounded-[1.05rem] border p-2.5 ${frame.card}`}>
+                              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Racha</div>
+                              <div className="mt-1 text-lg font-semibold text-[var(--ink-strong)]">{formatStreak(entry.summary.currentStreak)}</div>
                             </div>
                           </div>
-                          {premiumSettlementInfo?.note && (
-                            <div className="mt-2 rounded-[0.8rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-2.5 py-1.5 text-[11px] text-[#6d5220]">
-                              {premiumSettlementInfo.note}
-                            </div>
-                          )}
-                        </>
-                      );
-                    })() : (
-                      <>
-                        <div className="mt-1.5 text-base font-semibold text-[var(--ink-strong)]">Sin premium visible</div>
-                        <div className="mt-1.5 text-xs text-[var(--ink-soft)]">
-                          {premiumEmptyMessage}
                         </div>
-                      </>
-                    )}
+                      );
+                    })}
                   </div>
 
                   {/* Panel swap: Top Score / Historial */}
@@ -1230,7 +1280,7 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                             : 'border-[#efe1b8] bg-transparent text-[var(--ink-muted)] hover:bg-[rgba(255,248,224,0.5)]'
                         }`}
                       >
-                        Historial · {premiumView.history.length}
+                        Historial
                       </button>
                     </div>
 
@@ -1243,26 +1293,27 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                         null;
                       const betterPostLock = selectedDataMode === 'live' && premiumView.betterPickPostLock;
                       const betterPickData = premiumView.betterPick;
-const topItems = todayTopPicks.map((item, idx) => ({
-  rank: idx + 1,
-  gameId: item.gameId,
-  market: item.market,
-  selection: item.selection,
-  gameLabel: resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent),
-  score: item.score,
-  odds: item.executionOdds ?? null,
-  edge: item.edge ?? null,
-  ev: item.ev ?? null,
-  estimatedProbability: item.estimatedProbability ?? null,
-  impliedProbability: item.impliedProbability ?? null,
-  prevScore: item.prevScore ?? null,
-  prevOdds: item.prevExecutionOdds ?? null,
-  prevEdge: item.prevEdge ?? null,
-  prevEv: item.prevEv ?? null,
-  prevEstimatedProbability: item.prevEstimatedProbability ?? null,
-  prevImpliedProbability: item.prevImpliedProbability ?? null,
-  chosen: item.gameId === solidGameId,
-}));
+                      const topItems = todayTopPicks.map((item, idx) => ({
+                        rank: idx + 1,
+                        gameId: item.gameId,
+                        market: item.market,
+                        selection: item.selection,
+                        confidence: item.confidence,
+                        gameLabel: resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent),
+                        score: item.score,
+                        odds: item.executionOdds ?? null,
+                        edge: item.edge ?? null,
+                        ev: item.ev ?? null,
+                        estimatedProbability: item.estimatedProbability ?? null,
+                        impliedProbability: item.impliedProbability ?? null,
+                        prevScore: item.prevScore ?? null,
+                        prevOdds: item.prevExecutionOdds ?? null,
+                        prevEdge: item.prevEdge ?? null,
+                        prevEv: item.prevEv ?? null,
+                        prevEstimatedProbability: item.prevEstimatedProbability ?? null,
+                        prevImpliedProbability: item.prevImpliedProbability ?? null,
+                        chosen: item.gameId === solidGameId,
+                      }));
 
                       if (!topItems.length) {
                         return (
@@ -1281,14 +1332,20 @@ const topItems = todayTopPicks.map((item, idx) => ({
                                 {betterPickData.market} · {betterPickData.selection} · Score {formatMetric(betterPickData.score)}
                               </div>
                               <div className="text-[10px] text-[#8a6115]">
-  {resolveMatchupLabel(betterPickData.gameId, betterPickData.gameLabel, stats?.recent)}
-</div>
+                                {resolveMatchupLabel(betterPickData.gameId, betterPickData.gameLabel, stats?.recent)}
+                              </div>
                             </div>
                           )}
                           {topItems.map((pick) => (
                             <div
                               key={pick.rank}
-                              className={`rounded-[0.9rem] px-2.5 py-2 ${pick.chosen ? 'border border-[#ead18f]/60 bg-[rgba(255,248,224,0.8)]' : 'border border-[var(--line-soft)] bg-[var(--surface-soft)]'}`}
+                              className={
+                                pick.rank === 1
+                                  ? 'rounded-[0.95rem] border border-[#ead18f]/60 bg-[rgba(255,248,224,0.82)] px-2.5 py-2'
+                                  : pick.rank === 2
+                                    ? 'rounded-[0.95rem] border border-[#d9dee7] bg-[linear-gradient(145deg,rgba(243,246,251,0.94),rgba(255,255,255,0.98))] px-2.5 py-2'
+                                    : 'rounded-[0.95rem] border border-[#e2cdb8] bg-[linear-gradient(145deg,rgba(247,239,232,0.94),rgba(255,255,255,0.98))] px-2.5 py-2'
+                              }
                             >
                               <div className="flex items-center gap-2">
                                 <span className="w-4 shrink-0 text-[10px] font-bold text-[var(--ink-muted)]">#{pick.rank}</span>
@@ -1299,6 +1356,11 @@ const topItems = todayTopPicks.map((item, idx) => ({
                                   {pick.market}
                                 </span>
                                 <span className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{pick.selection}</span>
+                                {pick.rank === 1 && (
+                                  <span className="ml-auto shrink-0 rounded-full border border-[#ead18f]/70 bg-[rgba(255,248,224,0.96)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8a6115]">
+                                    Pick solido de hoy
+                                  </span>
+                                )}
                               </div>
                               {pick.gameLabel && (
                                 <div className="mt-0.5 pl-6 text-[10px] text-[var(--ink-muted)]">{pick.gameLabel}</div>
@@ -1314,7 +1376,7 @@ const topItems = todayTopPicks.map((item, idx) => ({
                                     { label: 'Odds', cur: pick.odds, prev: pick.prevOdds, fmt: formatOdds, inv: true },
                                   ];
                                   return metrics.map(({ label, cur, prev, fmt, inv }) => {
-                                    const d = (typeof cur === 'number' && typeof prev === 'number' && Math.abs(cur - prev) >= 0.0005) ? cur - prev : null;
+                                    const d = typeof cur === 'number' && typeof prev === 'number' && Math.abs(cur - prev) >= 0.0005 ? cur - prev : null;
                                     const dc = d !== null ? ((inv ? d < 0 : d > 0) ? 'text-emerald-600' : 'text-rose-500') : '';
                                     return (
                                       <div key={label} className="rounded-[0.6rem] bg-white/60 px-1.5 py-1">
@@ -1336,28 +1398,41 @@ const topItems = todayTopPicks.map((item, idx) => ({
 
                     {/* Panel: Historial */}
                     {solidHistoryOpen && (
-                      <div className="space-y-1">
-                        {visibleSolidHistory.map((item) => (
-                          <div key={`${item.date}-${item.gameId}`} className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-1.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.date)}</div>
-                              <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
+                      <div className="grid gap-2 xl:grid-cols-3">
+                        {premiumHistoryColumns.map((column) => (
+                          <div key={`premium-history-rank-${column.rank}`} className="space-y-1">
+                            <div className="rounded-[0.85rem] border border-[var(--line-soft)] bg-white/70 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--ink-muted)]">
+                              Historial · {column.rank}
                             </div>
-<div className="text-[10px] text-[var(--ink-muted)]">
-  {resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent)}
-</div>
-                            <div className="mt-0.5 text-[11px] text-[var(--ink-strong)]">{item.market} · {item.selection}</div>
-                            <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">Score {formatMetric(item.score)} · {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
+                            {column.items.length ? (
+                              column.items.map((item) => (
+                                <div key={`${column.rank}-${item.date}-${item.gameId}`} className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-1.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="truncate text-[11px] font-semibold text-[var(--ink-strong)]">{formatDateLabel(item.date)}</div>
+                                    <div className="shrink-0 text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">{item.status} · {item.confidence}</div>
+                                  </div>
+                                  <div className="text-[10px] text-[var(--ink-muted)]">{resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent)}</div>
+                                  <div className="mt-0.5 text-[11px] text-[var(--ink-strong)]">{item.market} · {item.selection}</div>
+                                  <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">Score {formatMetric(item.score)} · {formatOdds(item.executionOdds)} · {formatUnits(item.profitUnits)}</div>
+                                </div>
+                              ))
+                            ) : (
+                              <div className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-2 text-[11px] text-[var(--ink-soft)]">
+                                Sin historial visible para top #{column.rank}.
+                              </div>
+                            )}
                           </div>
                         ))}
                         {hasMoreSolidHistory && (
-                          <button
-                            type="button"
-                            onClick={() => setSolidHistoryVisibleCount((current) => current + SOLID_HISTORY_PAGE_SIZE)}
-                            className="w-full rounded-[0.85rem] border border-[var(--line-soft)] bg-white px-3 py-1.5 text-xs font-semibold text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
-                          >
-                            Ver más historial
-                          </button>
+                          <div className="xl:col-span-3">
+                            <button
+                              type="button"
+                              onClick={() => setSolidHistoryVisibleCount((current) => current + SOLID_HISTORY_PAGE_SIZE)}
+                              className="w-full rounded-[0.85rem] border border-[var(--line-soft)] bg-white px-3 py-1.5 text-xs font-semibold text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
+                            >
+                              Ver más historial
+                            </button>
+                          </div>
                         )}
                       </div>
                     )}
@@ -1365,8 +1440,7 @@ const topItems = todayTopPicks.map((item, idx) => ({
                 </div>
               </section>
             </section>
-
-            {/* Row 3 — Performance 3-col */}
+            {/* Row 3 â€” Performance 3-col */}
             <section className="mt-3 grid gap-3 xl:grid-cols-3">
               <section className="glass-panel rounded-[1.6rem] p-3">
                 <h3 className="font-heading text-[1.3rem] font-semibold text-[var(--ink-strong)]">Por confianza</h3>
@@ -1422,7 +1496,7 @@ const topItems = todayTopPicks.map((item, idx) => ({
               </section>
             </section>
 
-{/* Row 4 — Infraestructura 3-col */}
+{/* Row 4 â€” Infraestructura 3-col */}
 <section className="mt-3 grid gap-3 xl:grid-cols-3">
   <div className="glass-panel rounded-[1.35rem] p-3.5">
     <div className="flex items-center justify-between gap-3">
@@ -1476,7 +1550,7 @@ const topItems = todayTopPicks.map((item, idx) => ({
         Odds
       </div>
 
-      {/* 🔥 Conteo principal: MES */}
+      {/* ðŸ”¥ Conteo principal: MES */}
       <div className="mt-1 text-[1.4rem] font-semibold text-[var(--ink-strong)]">
         {usage?.odds?.monthCount ?? 0}
       </div>
@@ -1494,7 +1568,7 @@ const topItems = todayTopPicks.map((item, idx) => ({
     </div>
   </div>
 
-  {/* 🔥 Detalle: HOY + LÍMITE */}
+  {/* ðŸ”¥ Detalle: HOY + LÃMITE */}
   <div className="mt-1 text-[11px] text-[var(--ink-soft)]">
     Hoy: {usage?.odds?.todayCount ?? 0} · / {usage?.odds?.monthlyLimit ?? 2500} mes
   </div>
@@ -1530,3 +1604,4 @@ const topItems = todayTopPicks.map((item, idx) => ({
     </main>
   );
 }
+

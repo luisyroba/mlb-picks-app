@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getPregameSnapshotsByIds, listConfirmedPicksForLedger } from '@/lib/db';
+import {
+  getLatestMarketSnapshotsByGameIds,
+  getPregameSnapshotsByIds,
+  listConfirmedPicksForLedger
+} from '@/lib/db';
+import { resolveMatchupLabel } from '@/lib/matchup-label';
 import { expectedValue, impliedProbability } from '@/lib/probability-model';
 
 function roundOdds(value?: number | null): number | null {
@@ -88,46 +93,6 @@ function buildExecutionTitle(pick: Record<string, unknown>): string {
   return selection;
 }
 
-function getGameLabel(snapshotPayload: Record<string, unknown> | null, gameId: string): string {
-  const espnGame =
-    snapshotPayload?.espnGame && typeof snapshotPayload.espnGame === 'object'
-      ? snapshotPayload.espnGame as Record<string, unknown>
-      : null;
-
-  const shortName = typeof espnGame?.shortName === 'string' ? espnGame.shortName : null;
-  if (shortName) return shortName;
-
-  const engineGame =
-    snapshotPayload?.engineGame && typeof snapshotPayload.engineGame === 'object'
-      ? snapshotPayload.engineGame as Record<string, unknown>
-      : null;
-  const homeTeam =
-    engineGame?.homeTeam && typeof engineGame.homeTeam === 'object'
-      ? engineGame.homeTeam as Record<string, unknown>
-      : null;
-  const awayTeam =
-    engineGame?.awayTeam && typeof engineGame.awayTeam === 'object'
-      ? engineGame.awayTeam as Record<string, unknown>
-      : null;
-  const homeCore =
-    homeTeam?.core && typeof homeTeam.core === 'object'
-      ? homeTeam.core as Record<string, unknown>
-      : null;
-  const awayCore =
-    awayTeam?.core && typeof awayTeam.core === 'object'
-      ? awayTeam.core as Record<string, unknown>
-      : null;
-
-  const homeName = typeof homeCore?.teamName === 'string' ? homeCore.teamName : null;
-  const awayName = typeof awayCore?.teamName === 'string' ? awayCore.teamName : null;
-
-  if (awayName && homeName) {
-    return `${awayName} @ ${homeName}`;
-  }
-
-  return gameId;
-}
-
 function getTeamIdentity(snapshotPayload: Record<string, unknown> | null): {
   homeName: string | null;
   awayName: string | null;
@@ -208,6 +173,11 @@ function getGameDate(
 export async function GET() {
   try {
     const data = await listConfirmedPicksForLedger();
+    const gameIds = [...new Set(
+      data
+        .map((pick) => pick.game_id ?? '')
+        .filter((gameId): gameId is string => Boolean(gameId))
+    )];
     const snapshotIds = [...new Set(
       data
         .map((pick) => pick.snapshot_id ?? '')
@@ -221,6 +191,14 @@ export async function GET() {
       snapshotsById = new Map();
     }
 
+    let marketSnapshotsByGameId = new Map();
+
+    try {
+      marketSnapshotsByGameId = await getLatestMarketSnapshotsByGameIds(gameIds);
+    } catch {
+      marketSnapshotsByGameId = new Map();
+    }
+
     const picks = (data ?? []).map((pick) => {
       const snapshot = pick.snapshot_id
         ? snapshotsById.get(pick.snapshot_id) ?? null
@@ -232,7 +210,11 @@ export async function GET() {
 
 return {
   id: pick.id,
-  gameLabel: getGameLabel(snapshotPayload, pick.game_id),
+  gameLabel: resolveMatchupLabel({
+    snapshotPayload,
+    marketSnapshot: marketSnapshotsByGameId.get(pick.game_id) ?? null,
+    gameId: pick.game_id
+  }),
   market: pick.market,
   confidence: pick.confidence,
 

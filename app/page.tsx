@@ -2,6 +2,7 @@
 
 import Image from 'next/image';
 import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   formatDateKeyForTimezone,
   formatDateTimeForTimezone
@@ -1216,9 +1217,10 @@ const AnalysisModal = memo(function AnalysisModal({
   }, [open, game?.gameId]);
 
   if (!open || !game) return null;
+  if (typeof document === 'undefined') return null;
 
-  return (
-    <div className="fixed inset-0 z-50 p-3 md:p-6">
+  return createPortal(
+    <div className="fixed inset-0 z-[90] overflow-y-auto p-2 sm:p-3 md:p-6">
       <button
         type="button"
         tabIndex={-1}
@@ -1227,16 +1229,16 @@ const AnalysisModal = memo(function AnalysisModal({
         className="absolute inset-0 bg-[rgba(4,12,28,0.58)] backdrop-blur-[6px]"
       />
 
-      <div className="relative mx-auto flex h-full max-w-[1500px] items-center justify-center">
+      <div className="relative mx-auto flex min-h-full max-w-[1500px] items-start justify-center md:items-center">
         <div
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
           aria-label="Análisis del juego"
           tabIndex={-1}
-          className="relative max-h-[92vh] w-full overflow-y-auto rounded-[2rem] border border-[rgba(255,255,255,0.18)] bg-[linear-gradient(180deg,rgba(255,253,250,0.98),rgba(245,241,233,0.97))] p-4 shadow-[0_36px_120px_rgba(6,22,47,0.38)] md:p-5"
+          className="relative w-full overflow-y-auto rounded-[1.5rem] border border-[rgba(255,255,255,0.18)] bg-[linear-gradient(180deg,rgba(255,253,250,0.98),rgba(245,241,233,0.97))] p-4 shadow-[0_36px_120px_rgba(6,22,47,0.38)] max-md:min-h-[calc(100dvh-1rem)] max-md:rounded-[1.35rem] md:my-6 md:max-h-[92dvh] md:p-5"
         >
-          <div className="absolute inset-x-0 top-0 h-28 rounded-t-[2rem] bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.2),transparent_52%),radial-gradient(circle_at_top_right,rgba(244,63,94,0.18),transparent_44%)]" />
+          <div className="absolute inset-x-0 top-0 h-28 rounded-t-[inherit] bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.2),transparent_52%),radial-gradient(circle_at_top_right,rgba(244,63,94,0.18),transparent_44%)]" />
 
           <div className="relative">
             <div className="flex items-start justify-between gap-4">
@@ -1268,7 +1270,7 @@ const AnalysisModal = memo(function AnalysisModal({
                 ref={closeButtonRef}
                 type="button"
                 onClick={onClose}
-                className="rounded-full border border-[var(--line-soft)] bg-white/82 p-2.5 text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
+                className="sticky top-0 z-10 rounded-full border border-[var(--line-soft)] bg-white/88 p-2.5 text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
               >
                 <CloseIcon />
               </button>
@@ -1619,7 +1621,8 @@ const AnalysisModal = memo(function AnalysisModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }, (previous, next) => {
   if (previous.open === true || next.open === true) {
