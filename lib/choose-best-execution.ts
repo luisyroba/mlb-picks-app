@@ -28,42 +28,38 @@ type TierExecutionConfig = {
   tooConservativePenalty: number;
   tooAggressivePenalty: number;
   aggressionTolerance: number;
-  maxPositiveOddsDrift: number;
 };
 
 function getExecutionConfig(tier: 'A' | 'B' | 'C'): TierExecutionConfig {
   if (tier === 'A') {
     return {
-      hardMinOdds: 1.55,
+      hardMinOdds: 1.5,
       idealMinOdds: 1.62,
       idealMaxOdds: 1.78,
       tooConservativePenalty: 22,
       tooAggressivePenalty: 18,
-      aggressionTolerance: 1,
-      maxPositiveOddsDrift: 0.18
+      aggressionTolerance: 1
     };
   }
 
   if (tier === 'B') {
     return {
-      hardMinOdds: 1.55,
+      hardMinOdds: 1.5,
       idealMinOdds: 1.58,
       idealMaxOdds: 1.72,
       tooConservativePenalty: 14,
       tooAggressivePenalty: 16,
-      aggressionTolerance: 1,
-      maxPositiveOddsDrift: 0.26
+      aggressionTolerance: 1
     };
   }
 
   return {
-    hardMinOdds: 1.6,
+    hardMinOdds: 1.5,
     idealMinOdds: 1.6,
     idealMaxOdds: 1.66,
     tooConservativePenalty: 10,
     tooAggressivePenalty: 20,
-    aggressionTolerance: 0,
-    maxPositiveOddsDrift: 0.36
+    aggressionTolerance: 0
   };
 }
 

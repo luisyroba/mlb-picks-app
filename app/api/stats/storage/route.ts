@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { listConfirmedPicks, supabase } from '@/lib/db';
+import { getPickStorageSampleColumns, supabase } from '@/lib/db';
 
 const SUPABASE_FREE_DB_LIMIT_MB = 500;
 
@@ -75,20 +75,16 @@ async function buildSampledTableEstimate(config: {
   };
 }
 
-async function listConfirmedPickRowsForStorageEstimate(): Promise<Record<string, unknown>[]> {
-  // IMPORTANTE:
-  // No adivinamos la tabla.
-  // Reutilizamos la misma fuente real que ya usa /api/stats.
-  const picks = await listConfirmedPicks();
-
-  return Array.isArray(picks)
-    ? (picks as unknown as Record<string, unknown>[])
-    : [];
-}
-
-async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
+async function buildStorageEstimate() {
   // Estimamos tablas pesadas/relevantes del proyecto.
-  const [gameSnapshots, marketSnapshots, oddsCache] = await Promise.all([
+  const [picks, gameSnapshots, marketSnapshots, oddsCache] = await Promise.all([
+    buildSampledTableEstimate({
+      table: 'picks',
+      label: 'Picks',
+      sampleColumns: getPickStorageSampleColumns(),
+      orderBy: 'updated_at',
+      sampleLimit: 40
+    }),
     buildSampledTableEstimate({
       table: 'game_snapshots',
       label: 'Game snapshots',
@@ -115,16 +111,7 @@ async function buildStorageEstimate(allPicks: Array<Record<string, unknown>>) {
   ]);
 
   // confirmed_picks se estima a partir de la muestra leída arriba.
-  const breakdownRaw = [
-    {
-      key: 'Picks',
-      rows: allPicks.length,
-      bytes: estimateTableBytes(allPicks)
-    },
-    gameSnapshots,
-    marketSnapshots,
-    oddsCache
-  ];
+  const breakdownRaw = [picks, gameSnapshots, marketSnapshots, oddsCache];
 
   const totalBytes = breakdownRaw.reduce((total, item) => total + item.bytes, 0);
   const estimatedUsedMb = roundMb(totalBytes);
@@ -148,8 +135,7 @@ export async function GET() {
   try {
     // Este endpoint calcula solo storage.
     // Ya no frena la carga principal de /api/stats.
-    const allPicks = await listConfirmedPickRowsForStorageEstimate();
-    const storage = await buildStorageEstimate(allPicks);
+    const storage = await buildStorageEstimate();
 
     return NextResponse.json(storage);
   } catch (error) {

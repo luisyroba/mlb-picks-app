@@ -8,10 +8,10 @@ import {
   closePremiumDailyLock,
   supabase
 } from '@/lib/db';
-import { autoSettlePendingPicks } from '@/lib/auto-settle-picks';
 import { expectedValue, impliedProbability } from '@/lib/probability-model';
 import {
   ODDS_REFRESH_COOLDOWN_MS,
+  LIVE_STATS_CUTOFF_DATE_KEY,
   SOLID_PICK_RESET_DATE_KEYS,
   USER_TIMEZONE
 } from '@/lib/runtime-config';
@@ -22,6 +22,7 @@ const SUPABASE_FREE_DB_LIMIT_MB = 500;
 const ODDS_MONTHLY_LIMIT = 2500;
 const ODDS_REFRESH_COOLDOWN_MINUTES = Math.round(ODDS_REFRESH_COOLDOWN_MS / 60000);
 const PREMIUM_LOCK_MINUTES = 10;
+const RECENT_UI_LIMIT = 40;
 
 type StatsPickRecord = Record<string, unknown> & {
   game_date_key: string | null;
@@ -95,6 +96,192 @@ type SolidPickPoint = {
   createdAt: string;
   updatedAt: string;
 };
+
+type TodayRankingItem = {
+  gameId: string;
+  gameLabel: string;
+  market: string;
+  selection: string;
+  confidence: string;
+  score: number;
+  edge: number | null;
+  ev: number | null;
+  estimatedProbability: number | null;
+  impliedProbability: number | null;
+  executionOdds: number | null;
+  gameStartTime: string | null;
+  prevScore: number | null;
+  prevEdge: number | null;
+  prevEv: number | null;
+  prevEstimatedProbability: number | null;
+  prevImpliedProbability: number | null;
+  prevExecutionOdds: number | null;
+};
+
+type SliceSummary = {
+  totalPicks: number;
+  settledCount: number;
+  gradedCount: number;
+  pendingCount: number;
+  wonCount: number;
+  lostCount: number;
+  voidCount: number;
+  winRate: number | null;
+  totalProfitUnits: number;
+  roi: number | null;
+  avgEdge: number | null;
+  avgEv: number | null;
+};
+
+type SlicePremiumSummary = {
+  total: number;
+  settled: number;
+  won: number;
+  lost: number;
+  void: number;
+  pending: number;
+  winRate: number | null;
+  currentStreak: { type: 'won' | 'lost'; count: number } | null;
+};
+
+type DailyPremiumTopPick = {
+  gameId: string;
+  gameLabel: string;
+  market: string;
+  selection: string;
+  confidence: string;
+  status: string;
+  profitUnits: number | null;
+};
+
+type DailySummaryItem = {
+  date: string;
+  settled: number;
+  graded: number;
+  won: number;
+  lost: number;
+  void: number;
+  pending: number;
+  profitUnits: number;
+  roi: number | null;
+  premiumTopPick: DailyPremiumTopPick | null;
+};
+
+type SlicePremiumView = {
+  summary: SlicePremiumSummary;
+  history: SolidPickPoint[];
+  currentPick: PremiumPickResult | null;
+  todayRanking: TodayRankingItem[];
+  isLocked: boolean;
+  isClosed: boolean;
+  betterPickPostLock: boolean;
+  betterPick: PremiumPickResult | null;
+};
+
+type DisplaySlice = {
+  key: string;
+  label: string;
+  mode: 'testing' | 'live';
+  startDate: string | null;
+  endDate: string | null;
+  summary: SliceSummary;
+  byMarket: BucketSummary[];
+  byConfidence: BucketSummary[];
+  byEdgeRange: BucketSummary[];
+  trend: TrendPoint[];
+  premium: SlicePremiumView;
+  daily: DailySummaryItem[];
+};
+
+type LivePeriodMeta = {
+  key: string;
+  label: string;
+  startDate: string;
+  endDate: string;
+  isCurrent: boolean;
+  hasData: boolean;
+};
+
+type CurrentPremiumContext = {
+  todayDateKey: string;
+  premiumPick: PremiumPickResult | null;
+  todayRanking: TodayRankingItem[];
+  isLocked: boolean;
+  isClosed: boolean;
+  betterPickPostLock: boolean;
+  betterPick: PremiumPickResult | null;
+};
+
+const EDGE_BAND_ORDER = ['7%+', '4-7%', '2-4%', '<2%', 'Sin edge'];
+
+function parseDateKey(dateKey: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    return null;
+  }
+
+  const date = new Date(`${dateKey}T12:00:00.000Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDaysToDateKey(dateKey: string, days: number): string {
+  const date = parseDateKey(dateKey);
+  if (!date) return dateKey;
+
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function getSundayOnOrAfterDateKey(dateKey: string): string {
+  const date = parseDateKey(dateKey);
+  if (!date) return dateKey;
+
+  const daysUntilSunday = (7 - date.getUTCDay()) % 7;
+  return addDaysToDateKey(dateKey, daysUntilSunday);
+}
+
+function formatPeriodLabel(startDate: string, endDate: string): string {
+  return `${startDate.slice(8)}-${endDate.slice(8)}`;
+}
+
+function buildLivePeriods(
+  cutoffDateKey: string,
+  throughDateKey: string,
+  todayDateKey: string,
+  picks: Array<Record<string, unknown>>
+): LivePeriodMeta[] {
+  if (throughDateKey < cutoffDateKey) {
+    return [];
+  }
+
+  const liveDateKeys = new Set(
+    picks
+      .map((pick) => getPickAuditDateKey(pick))
+      .filter(
+        (dateKey): dateKey is string =>
+          typeof dateKey === 'string' && dateKey >= cutoffDateKey
+      )
+  );
+
+  const periods: LivePeriodMeta[] = [];
+  let startDate = cutoffDateKey;
+  let endDate = getSundayOnOrAfterDateKey(cutoffDateKey);
+
+  while (startDate <= throughDateKey) {
+    periods.push({
+      key: `${startDate}:${endDate}`,
+      label: formatPeriodLabel(startDate, endDate),
+      startDate,
+      endDate,
+      isCurrent: todayDateKey >= startDate && todayDateKey <= endDate,
+      hasData: [...liveDateKeys].some((dateKey) => dateKey >= startDate && dateKey <= endDate)
+    });
+
+    startDate = addDaysToDateKey(endDate, 1);
+    endDate = addDaysToDateKey(startDate, 6);
+  }
+
+  return periods;
+}
 
 function getGameDate(snapshotStartTime?: string | null, fallback?: string | null): string | null {
   if (snapshotStartTime) return snapshotStartTime;
@@ -381,13 +568,10 @@ function getSolidPickScore(pick: Record<string, unknown>): number {
   return Number(score.toFixed(3));
 }
 
-function buildSolidPickAudit(
-  picks: Array<Record<string, unknown>>
+function buildSolidPickAuditRange(
+  picks: Array<Record<string, unknown>>,
+  auditStartDate: string | null
 ) {
-  const auditStartDate =
-    [...SOLID_PICK_RESET_DATE_KEYS]
-      .sort((left, right) => left.localeCompare(right))
-      .at(-1) ?? null;
   const grouped = new Map<string, SolidPickPoint>();
 
   for (const pick of picks) {
@@ -483,6 +667,368 @@ function buildSolidPickAudit(
             }
     },
     history: settledHistory
+  };
+}
+
+function buildSolidPickAudit(
+  picks: Array<Record<string, unknown>>
+) {
+  const auditStartDate =
+    [...SOLID_PICK_RESET_DATE_KEYS]
+      .sort((left, right) => left.localeCompare(right))
+      .at(-1) ?? null;
+
+  return buildSolidPickAuditRange(picks, auditStartDate);
+}
+
+function buildSliceSummary(
+  picks: Array<Record<string, unknown>>
+): SliceSummary {
+  let edgeTotal = 0;
+  let edgeCount = 0;
+  let evTotal = 0;
+  let evCount = 0;
+  let profitUnits = 0;
+  let wonCount = 0;
+  let lostCount = 0;
+  let voidCount = 0;
+  let pendingCount = 0;
+
+  for (const pick of picks) {
+    if (pick.status === 'won') wonCount += 1;
+    if (pick.status === 'lost') lostCount += 1;
+    if (pick.status === 'void') voidCount += 1;
+    if (pick.status === 'pending') pendingCount += 1;
+
+    profitUnits +=
+      typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+        ? pick.profit_units
+        : 0;
+
+    const effectiveEdge = getEffectiveEdge(pick);
+    if (typeof effectiveEdge === 'number') {
+      edgeTotal += effectiveEdge;
+      edgeCount += 1;
+    }
+
+    const effectiveEv = getEffectiveEv(pick);
+    if (typeof effectiveEv === 'number') {
+      evTotal += effectiveEv;
+      evCount += 1;
+    }
+  }
+
+  const gradedCount = wonCount + lostCount;
+  const settledCount = picks.filter((pick) => pick.status !== 'pending').length;
+
+  return {
+    totalPicks: picks.length,
+    settledCount,
+    gradedCount,
+    pendingCount,
+    wonCount,
+    lostCount,
+    voidCount,
+    winRate: gradedCount > 0 ? roundMetric(wonCount / gradedCount) : null,
+    totalProfitUnits: roundMetric(profitUnits) ?? 0,
+    roi: gradedCount > 0 ? roundMetric(profitUnits / gradedCount) : null,
+    avgEdge: edgeCount > 0 ? roundMetric(edgeTotal / edgeCount) : null,
+    avgEv: evCount > 0 ? roundMetric(evTotal / evCount) : null
+  };
+}
+
+function buildSliceBuckets(
+  picks: Array<Record<string, unknown>>
+): {
+  byMarket: BucketSummary[];
+  byConfidence: BucketSummary[];
+  byEdgeRange: BucketSummary[];
+} {
+  const byMarket = new Map<string, {
+    bucket: BucketSummary;
+    edgeTotal: number;
+    edgeCount: number;
+    evTotal: number;
+    evCount: number;
+  }>();
+  const byConfidence = new Map<string, {
+    bucket: BucketSummary;
+    edgeTotal: number;
+    edgeCount: number;
+    evTotal: number;
+    evCount: number;
+  }>();
+  const byEdgeRange = new Map<string, {
+    bucket: BucketSummary;
+    edgeTotal: number;
+    edgeCount: number;
+    evTotal: number;
+    evCount: number;
+  }>();
+
+  for (const pick of picks) {
+    const profitUnits =
+      typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+        ? pick.profit_units
+        : 0;
+    const isSettled = pick.status !== 'pending';
+    const effectiveEdge = getEffectiveEdge(pick);
+    const effectiveEv = getEffectiveEv(pick);
+    const edgeRangeKey = getEdgeRangeKey(effectiveEdge);
+    const marketKey = String(pick.execution_market || pick.market || 'UNKNOWN');
+    const confidenceKey = String(pick.confidence || 'UNKNOWN');
+
+    if (!byMarket.has(marketKey)) {
+      byMarket.set(marketKey, {
+        bucket: createBucket(marketKey),
+        edgeTotal: 0,
+        edgeCount: 0,
+        evTotal: 0,
+        evCount: 0
+      });
+    }
+
+    if (!byConfidence.has(confidenceKey)) {
+      byConfidence.set(confidenceKey, {
+        bucket: createBucket(confidenceKey),
+        edgeTotal: 0,
+        edgeCount: 0,
+        evTotal: 0,
+        evCount: 0
+      });
+    }
+
+    if (!byEdgeRange.has(edgeRangeKey)) {
+      byEdgeRange.set(edgeRangeKey, {
+        bucket: createBucket(edgeRangeKey),
+        edgeTotal: 0,
+        edgeCount: 0,
+        evTotal: 0,
+        evCount: 0
+      });
+    }
+
+    for (const target of [
+      byMarket.get(marketKey),
+      byConfidence.get(confidenceKey),
+      byEdgeRange.get(edgeRangeKey)
+    ]) {
+      if (!target) continue;
+
+      target.bucket.total += 1;
+      target.bucket.profitUnits += profitUnits;
+
+      if (isSettled) target.bucket.settled += 1;
+      if (pick.status === 'won') target.bucket.won += 1;
+      if (pick.status === 'lost') target.bucket.lost += 1;
+      if (pick.status === 'void') target.bucket.void += 1;
+      if (pick.status === 'pending') target.bucket.pending += 1;
+
+      if (typeof effectiveEdge === 'number') {
+        target.edgeTotal += effectiveEdge;
+        target.edgeCount += 1;
+      }
+
+      if (typeof effectiveEv === 'number') {
+        target.evTotal += effectiveEv;
+        target.evCount += 1;
+      }
+    }
+  }
+
+  return {
+    byMarket: [...byMarket.values()]
+      .map((entry) =>
+        finalizeBucket(
+          entry.bucket,
+          entry.edgeTotal,
+          entry.edgeCount,
+          entry.evTotal,
+          entry.evCount
+        )
+      )
+      .sort((left, right) => right.total - left.total),
+    byConfidence: [...byConfidence.values()]
+      .map((entry) =>
+        finalizeBucket(
+          entry.bucket,
+          entry.edgeTotal,
+          entry.edgeCount,
+          entry.evTotal,
+          entry.evCount
+        )
+      )
+      .sort((left, right) => right.total - left.total),
+    byEdgeRange: [...byEdgeRange.values()]
+      .map((entry) =>
+        finalizeBucket(
+          entry.bucket,
+          entry.edgeTotal,
+          entry.edgeCount,
+          entry.evTotal,
+          entry.evCount
+        )
+      )
+      .sort(
+        (left, right) =>
+          EDGE_BAND_ORDER.indexOf(left.key) - EDGE_BAND_ORDER.indexOf(right.key)
+      )
+  };
+}
+
+function toDailyPremiumTopPick(item: SolidPickPoint): DailyPremiumTopPick {
+  return {
+    gameId: item.gameId,
+    gameLabel: item.gameLabel,
+    market: item.market,
+    selection: item.selection,
+    confidence: item.confidence,
+    status: item.status,
+    profitUnits: item.profitUnits
+  };
+}
+
+function buildDailySummary(
+  picks: Array<Record<string, unknown>>,
+  premiumAudit: ReturnType<typeof buildSolidPickAuditRange>,
+  currentPremiumContext?: CurrentPremiumContext | null
+): DailySummaryItem[] {
+  const byDate = new Map<string, {
+    settled: number;
+    graded: number;
+    won: number;
+    lost: number;
+    void: number;
+    pending: number;
+    profitUnits: number;
+  }>();
+
+  for (const pick of picks) {
+    const dateKey = getPickAuditDateKey(pick);
+    if (!dateKey) continue;
+
+    const entry = byDate.get(dateKey) ?? {
+      settled: 0,
+      graded: 0,
+      won: 0,
+      lost: 0,
+      void: 0,
+      pending: 0,
+      profitUnits: 0
+    };
+
+    if (pick.status !== 'pending') entry.settled += 1;
+    if (pick.status === 'won') {
+      entry.graded += 1;
+      entry.won += 1;
+    } else if (pick.status === 'lost') {
+      entry.graded += 1;
+      entry.lost += 1;
+    } else if (pick.status === 'void') {
+      entry.void += 1;
+    } else if (pick.status === 'pending') {
+      entry.pending += 1;
+    }
+
+    entry.profitUnits +=
+      typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+        ? pick.profit_units
+        : 0;
+
+    byDate.set(dateKey, entry);
+  }
+
+  const premiumByDate = new Map<string, DailyPremiumTopPick>();
+
+  for (const item of premiumAudit.history) {
+    premiumByDate.set(item.date, toDailyPremiumTopPick(item));
+  }
+
+  if (premiumAudit.today) {
+    premiumByDate.set(premiumAudit.today.date, toDailyPremiumTopPick(premiumAudit.today));
+  }
+
+  if (currentPremiumContext?.premiumPick) {
+    const currentDateKey = currentPremiumContext.todayDateKey;
+    premiumByDate.set(currentDateKey, {
+      gameId: currentPremiumContext.premiumPick.gameId,
+      gameLabel: currentPremiumContext.premiumPick.gameLabel,
+      market: currentPremiumContext.premiumPick.market,
+      selection: currentPremiumContext.premiumPick.selection,
+      confidence: currentPremiumContext.premiumPick.confidence,
+      status: 'pending',
+      profitUnits: null
+    });
+
+    if (!byDate.has(currentDateKey)) {
+      byDate.set(currentDateKey, {
+        settled: 0,
+        graded: 0,
+        won: 0,
+        lost: 0,
+        void: 0,
+        pending: 0,
+        profitUnits: 0
+      });
+    }
+  }
+
+  return [...byDate.keys()]
+    .sort((left, right) => right.localeCompare(left))
+    .map((date) => {
+      const entry = byDate.get(date)!;
+      return {
+        date,
+        settled: entry.settled,
+        graded: entry.graded,
+        won: entry.won,
+        lost: entry.lost,
+        void: entry.void,
+        pending: entry.pending,
+        profitUnits: roundMetric(entry.profitUnits) ?? 0,
+        roi: entry.graded > 0 ? roundMetric(entry.profitUnits / entry.graded) : null,
+        premiumTopPick: premiumByDate.get(date) ?? null
+      };
+    });
+}
+
+function buildDisplaySlice(
+  picks: StatsPickRecord[],
+  options: {
+    key: string;
+    label: string;
+    mode: 'testing' | 'live';
+    startDate: string | null;
+    endDate: string | null;
+    currentPremiumContext?: CurrentPremiumContext | null;
+  }
+): DisplaySlice {
+  const summary = buildSliceSummary(picks);
+  const buckets = buildSliceBuckets(picks);
+  const premiumAudit = buildSolidPickAuditRange(picks, null);
+
+  return {
+    key: options.key,
+    label: options.label,
+    mode: options.mode,
+    startDate: options.startDate,
+    endDate: options.endDate,
+    summary,
+    byMarket: buckets.byMarket,
+    byConfidence: buckets.byConfidence,
+    byEdgeRange: buckets.byEdgeRange,
+    trend: buildTrendSeries(picks),
+    premium: {
+      summary: premiumAudit.summary,
+      history: premiumAudit.history,
+      currentPick: options.currentPremiumContext?.premiumPick ?? null,
+      todayRanking: options.currentPremiumContext?.todayRanking ?? [],
+      isLocked: options.currentPremiumContext?.isLocked ?? false,
+      isClosed: options.currentPremiumContext?.isClosed ?? false,
+      betterPickPostLock: options.currentPremiumContext?.betterPickPostLock ?? false,
+      betterPick: options.currentPremiumContext?.betterPick ?? null
+    },
+    daily: buildDailySummary(picks, premiumAudit, options.currentPremiumContext)
   };
 }
 
@@ -631,10 +1177,6 @@ async function buildOddsUsageSummary() {
 
 export async function GET() {
   try {
-// Corre settlement en segundo plano para no bloquear /api/stats.
-// Sigue ayudando a actualizar statuses como el premium.
-void autoSettlePendingPicks().catch(() => undefined);
-
 const [confirmedPicks, summaryViewResult] = await Promise.all([
   listConfirmedPicks(),
   supabase
@@ -781,7 +1323,6 @@ const isSettled = pick.status !== 'pending';
       )
       .sort((left, right) => right.total - left.total);
 
-    const edgeBandOrder = ['7%+', '4-7%', '2-4%', '<2%', 'Sin edge'];
     const byEdgeRangeSummary = [...byEdgeRange.values()]
       .map((entry) =>
         finalizeBucket(
@@ -794,7 +1335,7 @@ const isSettled = pick.status !== 'pending';
       )
       .sort(
         (left, right) =>
-          edgeBandOrder.indexOf(left.key) - edgeBandOrder.indexOf(right.key)
+          EDGE_BAND_ORDER.indexOf(left.key) - EDGE_BAND_ORDER.indexOf(right.key)
       );
 
     const STORAGE_TIMEOUT_FALLBACK = {
@@ -826,11 +1367,11 @@ const [oddsUsage, vercelUsage, snapshotsById] = await Promise.all([
   }),
 
   // Snapshots recientes para premium/top 3/recent:
-  // limitamos a 120 para no cargar todo el historial.
+  // limitamos a RECENT_UI_LIMIT para no cargar todo el historial.
   withTimeout(
     getPregameSnapshotsByIds(
       recentPicks
-        .slice(0, 120)
+        .slice(0, RECENT_UI_LIMIT)
         .map((pick) => pick.snapshot_id ?? '')
         .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
     ).catch(() => new Map()),
@@ -947,7 +1488,7 @@ const rawTodayCandidates = pickRecords
       dedupGroups.set(dedupKey, group);
     }
 
-    const solidTodayRanking = [...dedupGroups.values()]
+    const solidTodayRanking: TodayRankingItem[] = [...dedupGroups.values()]
       .map((group) => {
         const sorted = [...group].sort((a, b) => b.score - a.score);
         const current = sorted[0];
@@ -1079,7 +1620,7 @@ const rawTodayCandidates = pickRecords
     }
     // --- End premium lock ---
 
-    const recent = recentWithSnapshots.map(({ pick, snapshotPayload, gameDate }) => ({
+    const recent = recentWithSnapshots.slice(0, RECENT_UI_LIMIT).map(({ pick, snapshotPayload, gameDate }) => ({
       id: pick.id,
       gameId: pick.game_id,
       gameLabel: getGameLabel(snapshotPayload, pick.game_id),
@@ -1102,6 +1643,90 @@ const rawTodayCandidates = pickRecords
       createdAt: pick.created_at,
       updatedAt: pick.updated_at
     }));
+
+    const testingPicks = pickRecords.filter((pick) => {
+      const dateKey = getPickAuditDateKey(pick);
+      return typeof dateKey === 'string' && dateKey < LIVE_STATS_CUTOFF_DATE_KEY;
+    });
+
+    const livePicks = pickRecords.filter((pick) => {
+      const dateKey = getPickAuditDateKey(pick);
+      return typeof dateKey === 'string' && dateKey >= LIVE_STATS_CUTOFF_DATE_KEY;
+    });
+
+    const baseCurrentPremiumContext: CurrentPremiumContext = {
+      todayDateKey,
+      premiumPick,
+      todayRanking: premiumClosed ? [] : solidTodayRanking,
+      isLocked,
+      isClosed: premiumClosed,
+      betterPickPostLock,
+      betterPick
+    };
+
+    const testingDisplay = buildDisplaySlice(testingPicks, {
+      key: 'testing',
+      label: 'Testing',
+      mode: 'testing',
+      startDate: null,
+      endDate: addDaysToDateKey(LIVE_STATS_CUTOFF_DATE_KEY, -1),
+      currentPremiumContext:
+        todayDateKey < LIVE_STATS_CUTOFF_DATE_KEY ? baseCurrentPremiumContext : null
+    });
+
+    const maxLiveDateKey =
+      livePicks
+        .map((pick) => getPickAuditDateKey(pick))
+        .filter((dateKey): dateKey is string => Boolean(dateKey))
+        .sort((left, right) => left.localeCompare(right))
+        .at(-1) ?? null;
+
+    const liveThroughDateKey =
+      todayDateKey >= LIVE_STATS_CUTOFF_DATE_KEY
+        ? maxLiveDateKey && maxLiveDateKey > todayDateKey
+          ? maxLiveDateKey
+          : todayDateKey
+        : maxLiveDateKey;
+
+    const livePeriods = liveThroughDateKey
+      ? buildLivePeriods(
+          LIVE_STATS_CUTOFF_DATE_KEY,
+          liveThroughDateKey,
+          todayDateKey,
+          pickRecords
+        )
+      : [];
+
+    const liveViews = livePeriods.map((period) => {
+      const periodPicks = livePicks.filter((pick) => {
+        const dateKey = getPickAuditDateKey(pick);
+        return (
+          typeof dateKey === 'string' &&
+          dateKey >= period.startDate &&
+          dateKey <= period.endDate
+        );
+      });
+
+      return {
+        ...period,
+        ...buildDisplaySlice(periodPicks, {
+          key: period.key,
+          label: period.label,
+          mode: 'live',
+          startDate: period.startDate,
+          endDate: period.endDate,
+          currentPremiumContext:
+            period.isCurrent && todayDateKey >= LIVE_STATS_CUTOFF_DATE_KEY
+              ? baseCurrentPremiumContext
+              : null
+        })
+      };
+    });
+
+    const activeLivePeriodKey =
+      liveViews.find((period) => period.isCurrent)?.key ??
+      liveViews.at(-1)?.key ??
+      null;
 
     return NextResponse.json({
       ok: true,
@@ -1144,7 +1769,23 @@ summary: {
         betterPickPostLock,
         ...(betterPick ? { betterPick } : {})
       },
-      recent
+      recent,
+      display: {
+        cutoffDate: LIVE_STATS_CUTOFF_DATE_KEY,
+        testing: testingDisplay,
+        live: {
+          activePeriodKey: activeLivePeriodKey,
+          periods: liveViews.map((period) => ({
+            key: period.key,
+            label: period.label,
+            startDate: period.startDate,
+            endDate: period.endDate,
+            isCurrent: period.isCurrent,
+            hasData: period.hasData
+          })),
+          views: liveViews
+        }
+      }
     });
   } catch (error) {
     const message =

@@ -173,6 +173,7 @@ type HomeStatsResponse = {
   };
 };
 const ANALYSIS_CACHE_MAX_AGE_MS = 60_000;
+const ANALYSIS_MODAL_REFRESH_MS = 15_000;
 
 function ClockIcon() {
   return (
@@ -1133,6 +1134,7 @@ const AnalysisModal = memo(function AnalysisModal({
   onClose: () => void;
 }) {
   const engineGame = analysis?.engineGame ?? null;
+  const [secondaryReady, setSecondaryReady] = useState(false);
   const contextChips = useMemo(
     () => (analysis && game ? getContextLinesVerbose(analysis, game) : []),
     [analysis, game]
@@ -1199,6 +1201,19 @@ const AnalysisModal = memo(function AnalysisModal({
       dialog.removeEventListener('keydown', handleTrap);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setSecondaryReady(false);
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      setSecondaryReady(true);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, game?.gameId]);
 
   if (!open || !game) return null;
 
@@ -1283,6 +1298,10 @@ const AnalysisModal = memo(function AnalysisModal({
                 {analysisLoading && !analysis ? (
                   <div className="glass-panel rounded-[1.5rem] p-5 text-sm text-[var(--ink-soft)]">
                     Armando el análisis del juego...
+                  </div>
+                ) : !secondaryReady ? (
+                  <div className="glass-panel rounded-[1.5rem] p-5 text-sm text-[var(--ink-soft)]">
+                    Cargando comparativas extendidas del matchup...
                   </div>
                 ) : engineGame ? (
                   <div className="grid gap-3 xl:grid-cols-2">
@@ -1391,64 +1410,70 @@ const AnalysisModal = memo(function AnalysisModal({
                   </div>
                 </section>
 
-                <section className="glass-panel rounded-[1.6rem] p-4">
-                  <div className="mb-4 rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
-                    {dataQuality.detail}
-                  </div>
-                  <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Contexto</div>
-                      <div className="mt-3 space-y-2">
-                        {contextChips.map((chip) => (
-                          <div
-                            key={chip}
-                            className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]"
-                          >
-                            {chip}
-                          </div>
-                        ))}
-                      </div>
+                {secondaryReady ? (
+                  <section className="glass-panel rounded-[1.6rem] p-4">
+                    <div className="mb-4 rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
+                      {dataQuality.detail}
                     </div>
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Argumento</div>
-                      <div className="mt-3 space-y-2">
-                        {argumentLines.length ? (
-                          argumentLines.map((line) => (
+                    <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Contexto</div>
+                        <div className="mt-3 space-y-2">
+                          {contextChips.map((chip) => (
                             <div
-                              key={line}
+                              key={chip}
                               className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]"
                             >
-                              {line}
+                              {chip}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Argumento</div>
+                        <div className="mt-3 space-y-2">
+                          {argumentLines.length ? (
+                            argumentLines.map((line) => (
+                              <div
+                                key={line}
+                                className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]"
+                              >
+                                {line}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
+                              Sin argumento adicional visible en este snapshot.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4">
+                      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Alertas de mercado</div>
+                      <div className="mt-3 space-y-2">
+                        {alertLines.length ? (
+                          alertLines.map((alert, index) => (
+                            <div
+                              key={`${alert}-${index}`}
+                              className="rounded-[1rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-3 py-2.5 text-sm text-[#6d5220]"
+                            >
+                              {alert}
                             </div>
                           ))
                         ) : (
                           <div className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
-                            Sin argumento adicional visible en este snapshot.
+                            Sin alertas relevantes en lineas o cuotas para este snapshot.
                           </div>
                         )}
                       </div>
                     </div>
-                  </div>
-                  <div className="mt-4">
-                    <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Alertas de mercado</div>
-                    <div className="mt-3 space-y-2">
-                      {alertLines.length ? (
-                        alertLines.map((alert, index) => (
-                          <div
-                            key={`${alert}-${index}`}
-                            className="rounded-[1rem] border border-[rgba(210,166,73,0.22)] bg-[rgba(210,166,73,0.08)] px-3 py-2.5 text-sm text-[#6d5220]"
-                          >
-                            {alert}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
-                          Sin alertas relevantes en lineas o cuotas para este snapshot.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </section>
+                  </section>
+                ) : (
+                  <section className="glass-panel rounded-[1.6rem] p-4 text-sm text-[var(--ink-soft)]">
+                    Cargando contexto, argumento y alertas del mercado...
+                  </section>
+                )}
 
                 <section className="glass-panel rounded-[1.6rem] p-4">
                   <div className="flex items-center justify-between gap-3">
@@ -2201,13 +2226,13 @@ useEffect(() => {
 
         if (cached) {
           applyExecutionSlotFromAnalysis(cached);
-          setAnalysisLoading(false);
+          setAnalysisLoading(true);
         } else {
           setAnalysisLoading(true);
         }
       }
 
-      if (cached && cachedIsFresh && !forceRefresh) {
+      if (cached && cachedIsFresh && !forceRefresh && !openPanel) {
         return cached;
       }
 
@@ -2246,7 +2271,7 @@ useEffect(() => {
 
       return cached;
     } finally {
-      if (openPanel && !cached) {
+      if (openPanel) {
         setAnalysisLoading(false);
       }
     }
@@ -2339,6 +2364,19 @@ useEffect(() => {
       setAnalysisModalOpen(false);
     }
   }, [analysisModalOpen, games, selectedGameId]);
+
+  useEffect(() => {
+    if (!analysisModalOpen || !selectedGameId) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void fetchAnalysis(selectedGameId, { forceRefresh: true });
+    }, ANALYSIS_MODAL_REFRESH_MS);
+
+    return () => window.clearInterval(interval);
+  }, [analysisModalOpen, fetchAnalysis, selectedGameId]);
 
   async function confirmExecutionForGame() {
     try {
@@ -2435,8 +2473,9 @@ useEffect(() => {
   return (
     <main className="px-3 pb-8 pt-4 lg:px-5">
       <div className="mx-auto max-w-[1620px]">
-        <section className="glass-panel rounded-[2rem] p-4 lg:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <section className="glass-panel rounded-[1.9rem] p-4 lg:p-5">
+          <div className="flex min-h-[168px] flex-col justify-between gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2">
               {[
                 { offset: 0, label: 'Hoy' },
@@ -2476,9 +2515,9 @@ useEffect(() => {
                 Analizando
               </span>
             )}
-          </div>
+            </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-[1.35rem] border border-[var(--line-soft)] bg-white p-3.5">
               <div className="flex items-center gap-2 text-sky-700">
                 <ClockIcon />
@@ -2547,6 +2586,7 @@ useEffect(() => {
                 </div>
               )}
             </div>
+          </div>
           </div>
         </section>
 

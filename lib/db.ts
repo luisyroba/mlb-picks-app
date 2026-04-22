@@ -75,6 +75,61 @@ const PICK_COLUMNS = [
   'updated_at'
 ].join(',');
 
+const PICK_STORAGE_SAMPLE_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'snapshot_stage',
+  'sport',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'implied_probability',
+  'edge',
+  'ev',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'execution_side',
+  'status',
+  'result',
+  'profit_units',
+  'game_day',
+  'created_at',
+  'updated_at'
+].join(',');
+
+const PICK_LEDGER_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'implied_probability',
+  'edge',
+  'ev',
+  'reason',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'execution_reason',
+  'status',
+  'result',
+  'profit_units',
+  'game_day',
+  'created_at',
+  'updated_at'
+].join(',');
+
 const ODDS_BOARD_CACHE_COLUMNS = [
   'id',
   'board_key',
@@ -230,6 +285,33 @@ export type PickRow = {
   created_at: string;
   updated_at: string;
 };
+
+export type PickLedgerRow = Pick<PickRow,
+  | 'id'
+  | 'game_id'
+  | 'snapshot_id'
+  | 'market'
+  | 'selection'
+  | 'line'
+  | 'odds'
+  | 'confidence'
+  | 'estimated_probability'
+  | 'implied_probability'
+  | 'edge'
+  | 'ev'
+  | 'reason'
+  | 'execution_market'
+  | 'execution_selection'
+  | 'execution_line'
+  | 'execution_odds'
+  | 'execution_reason'
+  | 'status'
+  | 'result'
+  | 'profit_units'
+  | 'game_day'
+  | 'created_at'
+  | 'updated_at'
+>;
 
 function assertSingleRow<T>(
   data: unknown,
@@ -731,6 +813,25 @@ export async function listConfirmedPicks(): Promise<PickRow[]> {
   return listPicks();
 }
 
+export async function listConfirmedPicksForLedger(): Promise<PickLedgerRow[]> {
+  const { data, error } = await supabase
+    .from('picks')
+    .select(PICK_LEDGER_COLUMNS)
+    .eq('sport', 'MLB')
+    .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch ledger picks: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<PickLedgerRow>(data, 'ledger pick')
+    : [];
+
+  return rows.filter((pick) => isConfirmedPickRecord(pick));
+}
+
 export async function listConfirmedPicksByGameIds(
   gameIds: string[]
 ): Promise<PickRow[]> {
@@ -741,6 +842,37 @@ export async function listPendingConfirmedPicks(): Promise<PickRow[]> {
   return listPicks({
     statuses: ['pending']
   });
+}
+
+export async function getPickStatusByGameId(
+  gameId: string
+): Promise<PickRow['status'] | null> {
+  const normalizedGameId = gameId.trim();
+  if (!normalizedGameId) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('picks')
+    .select('status')
+    .eq('sport', 'MLB')
+    .eq('game_id', normalizedGameId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to fetch pick status: ${error.message}`);
+  }
+
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return null;
+  }
+
+  const status = data.status;
+  return typeof status === 'string' ? status : null;
+}
+
+export function getPickStorageSampleColumns(): string {
+  return PICK_STORAGE_SAMPLE_COLUMNS;
 }
 
 export async function settlePickRecord(input: {

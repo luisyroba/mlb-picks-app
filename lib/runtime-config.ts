@@ -2,6 +2,7 @@ export const USER_TIMEZONE = 'America/Santiago';
 export const ODDS_REFRESH_COOLDOWN_MS = 20 * 60 * 1000;
 export const GAME_START_GRACE_PERIOD_MS = 5 * 60 * 1000;
 export const SOLID_PICK_RESET_DATE_KEYS: string[] = ['2026-04-16'];
+export const LIVE_STATS_CUTOFF_DATE_KEY = '2026-04-21';
 
 function getTimeZoneDateParts(
   value: Date | string | number,

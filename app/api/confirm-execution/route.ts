@@ -89,10 +89,6 @@ function parseExecutionRecommendation(
   if (!raw || typeof raw !== 'object') return null;
 
   const tier = (raw as Record<string, unknown>).tier;
-  const minAcceptedOdds =
-    typeof (raw as Record<string, unknown>).minAcceptedOdds === 'number'
-      ? ((raw as Record<string, unknown>).minAcceptedOdds as number)
-      : Number((raw as Record<string, unknown>).minAcceptedOdds);
 
   if (tier !== 'A' && tier !== 'B' && tier !== 'C') {
     return null;
@@ -103,10 +99,7 @@ function parseExecutionRecommendation(
       readLineFromUnknown((raw as Record<string, unknown>).recommendedLine) ?? null,
     alternative1: readLineFromUnknown((raw as Record<string, unknown>).alternative1),
     alternative2: readLineFromUnknown((raw as Record<string, unknown>).alternative2),
-    minAcceptedOdds:
-      Number.isFinite(minAcceptedOdds)
-        ? minAcceptedOdds
-        : getExecutionConfigForTier(tier).hardMinOdds,
+    minAcceptedOdds: getExecutionConfigForTier(tier).hardMinOdds,
     tier,
     reason:
       typeof (raw as Record<string, unknown>).reason === 'string'

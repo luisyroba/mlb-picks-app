@@ -1,10 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getPregameSnapshotsByIds, listConfirmedPicks } from '@/lib/db';
-import {
-  autoSettlePendingPicks,
-  autoSettleRecentBackfill,
-  revertIncorrectRecentAutoSettlements
-} from '@/lib/auto-settle-picks';
+import { getPregameSnapshotsByIds, listConfirmedPicksForLedger } from '@/lib/db';
 import { expectedValue, impliedProbability } from '@/lib/probability-model';
 
 function roundOdds(value?: number | null): number | null {
@@ -210,29 +205,14 @@ function getGameDate(
   return fallback ?? null;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))
-  ]);
-}
-
 export async function GET() {
   try {
-    await withTimeout(
-      (async () => {
-        await revertIncorrectRecentAutoSettlements({ hours: 36, limit: 300 });
-        await autoSettlePendingPicks();
-        await autoSettleRecentBackfill({ days: 5, limit: 250 });
-      })(),
-      4000,
-      undefined
-    ).catch(() => undefined);
-
-    const data = await listConfirmedPicks();
-    const snapshotIds = data
-      .map((pick) => pick.snapshot_id ?? '')
-      .filter((snapshotId): snapshotId is string => Boolean(snapshotId));
+    const data = await listConfirmedPicksForLedger();
+    const snapshotIds = [...new Set(
+      data
+        .map((pick) => pick.snapshot_id ?? '')
+        .filter((snapshotId): snapshotId is string => Boolean(snapshotId))
+    )];
     let snapshotsById = new Map();
 
     try {
@@ -252,15 +232,11 @@ export async function GET() {
 
 return {
   id: pick.id,
-  gameId: pick.game_id,
   gameLabel: getGameLabel(snapshotPayload, pick.game_id),
   market: pick.market,
-  selection: pick.selection,
   confidence: pick.confidence,
 
   executionMarket: pick.execution_market,
-  executionSelection: pick.execution_selection,
-  executionLine: pick.execution_line ?? null,
   executionOdds: roundOdds(pick.execution_odds),
   modelOdds: roundOdds(pick.odds),
   displayTitle: buildExecutionTitle(pick as Record<string, unknown>),
@@ -269,7 +245,6 @@ return {
   ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
 
   status: pick.status,
-  result: pick.result,
   finalScoreLabel: buildFinalScoreLabel(snapshotPayload, pick.result),
   profitUnits: roundMetric(pick.profit_units),
 
@@ -281,13 +256,12 @@ return {
   pick.created_at
 ),
   createdAt: pick.created_at,
-  updatedAt: pick.updated_at
 };
     });
 
     picks.sort((left, right) => {
-      const leftMs = new Date(String(left.gameDate ?? left.createdAt ?? left.updatedAt ?? '')).getTime();
-      const rightMs = new Date(String(right.gameDate ?? right.createdAt ?? right.updatedAt ?? '')).getTime();
+      const leftMs = new Date(String(left.gameDate ?? left.createdAt ?? '')).getTime();
+      const rightMs = new Date(String(right.gameDate ?? right.createdAt ?? '')).getTime();
       return rightMs - leftMs;
     });
 

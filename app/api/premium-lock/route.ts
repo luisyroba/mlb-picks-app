@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import {
   getPremiumDailyLock,
   closePremiumDailyLock,
-  listConfirmedPicks
+  getPickStatusByGameId
 } from '@/lib/db';
 import { USER_TIMEZONE } from '@/lib/runtime-config';
 
@@ -32,9 +32,8 @@ export async function GET() {
 
     const lockedGameId = String(p.gameId ?? '');
     if (lockedGameId) {
-      const picks = await listConfirmedPicks().catch(() => []);
-      const lockedRecord = picks.find((pick) => String(pick.game_id) === lockedGameId);
-      if (lockedRecord && lockedRecord.status !== 'pending') {
+      const lockedStatus = await getPickStatusByGameId(lockedGameId).catch(() => null);
+      if (lockedStatus && lockedStatus !== 'pending') {
         await closePremiumDailyLock(dateKey, p).catch(() => null);
         return NextResponse.json({ ok: true, dateKey, isLocked: false, isClosed: true });
       }

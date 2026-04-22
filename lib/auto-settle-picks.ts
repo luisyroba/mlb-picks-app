@@ -116,6 +116,15 @@ type ScheduleMatchResult = {
   ambiguous: boolean;
 };
 
+type GameStatusCarrier = {
+  status?: {
+    abstractGameState?: string;
+    detailedState?: string;
+  };
+} | null | undefined;
+
+const SCHEDULE_MATCH_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 function optionalNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
 
@@ -190,6 +199,20 @@ function isOfficialFinalStatus(value?: string | null): boolean {
     normalized.includes('completed early') ||
     normalized.includes('final official') ||
     normalized.includes('final/official')
+  );
+}
+
+function isGameFinal(game: GameStatusCarrier): boolean {
+  const abstract = String(game?.status?.abstractGameState ?? '').toLowerCase();
+  const detailed = String(game?.status?.detailedState ?? '').toLowerCase();
+
+  return (
+    abstract === 'final' ||
+    detailed.includes('final') ||
+    detailed.includes('game over') ||
+    detailed.includes('completed early') ||
+    detailed.includes('final official') ||
+    detailed.includes('final/official')
   );
 }
 
@@ -381,7 +404,6 @@ function getTeamDisplayName(team?: MlbScheduleTeam['team']): string {
 }
 
 function resolveScheduledGameStatus(game: MlbScheduleGame): OfficialGameResolution['kind'] {
-  const abstractState = String(game.status?.abstractGameState ?? '').toLowerCase();
   const detailedState = String(game.status?.detailedState ?? '').toLowerCase();
 
   if (
@@ -390,11 +412,42 @@ function resolveScheduledGameStatus(game: MlbScheduleGame): OfficialGameResoluti
     return 'void';
   }
 
-  if (abstractState === 'final' || isOfficialFinalStatus(detailedState)) {
+  if (isGameFinal({ status: game.status })) {
     return 'final';
   }
 
   return 'pending';
+}
+
+function getScheduleGameStartMs(game: MlbScheduleGame): number | null {
+  const start = game.gameDate ?? game.officialDate ?? null;
+  if (!start) {
+    return null;
+  }
+
+  const startMs = new Date(start).getTime();
+  return Number.isFinite(startMs) ? startMs : null;
+}
+
+function isScheduleGameTimeCompatible(
+  game: MlbScheduleGame,
+  espnDate: string | null
+): boolean {
+  if (!espnDate) {
+    return true;
+  }
+
+  const expectedStartMs = new Date(espnDate).getTime();
+  if (!Number.isFinite(expectedStartMs)) {
+    return true;
+  }
+
+  const gameStartMs = getScheduleGameStartMs(game);
+  if (gameStartMs === null) {
+    return false;
+  }
+
+  return Math.abs(gameStartMs - expectedStartMs) <= SCHEDULE_MATCH_WINDOW_MS;
 }
 
 function findScheduleGame(
@@ -420,7 +473,12 @@ function findScheduleGame(
   }
 
   if (!candidates.length) return { game: null, ambiguous: false };
-  if (candidates.length === 1) return { game: candidates[0], ambiguous: false };
+  if (candidates.length === 1) {
+    const candidate = candidates[0];
+    return isScheduleGameTimeCompatible(candidate, espnDate)
+      ? { game: candidate, ambiguous: false }
+      : { game: null, ambiguous: false };
+  }
   if (!espnDate) return { game: null, ambiguous: true };
 
   const expectedStartMs = new Date(espnDate).getTime();
@@ -450,7 +508,7 @@ function findScheduleGame(
       )
     : Number.POSITIVE_INFINITY;
 
-  if (!Number.isFinite(bestDistance) || bestDistance > 6 * 60 * 60 * 1000) {
+  if (!Number.isFinite(bestDistance) || bestDistance > SCHEDULE_MATCH_WINDOW_MS) {
     return { game: null, ambiguous: true };
   }
 
@@ -483,12 +541,17 @@ function isF5Closed(feed: MlbLiveFeedResponse): boolean {
   }
 
   // también válido si ya empezó el 6to
+  if (isGameFinal(feed.gameData)) {
+    return true;
+  }
+
   const currentInning = optionalNumber(linescore?.currentInning);
   if (currentInning !== undefined && currentInning >= 6) {
     return true;
   }
 
-  return true;
+  const inningState = String(linescore?.inningState ?? '').toLowerCase();
+  return currentInning === 5 && inningState.includes('end');
 }
 
 async function resolveOfficialGameForPick(
@@ -505,10 +568,6 @@ async function resolveOfficialGameForPick(
     console.info(`skipped settlement: game not final ${pick.game_id}`);
     return { kind: 'pending' };
   }
-if (isEspnPregameStatus(context.espnStatus)) {
-  console.info(`skipped settlement: game not final ${pick.game_id}`);
-  return { kind: 'pending' };
-}
 
   const scheduleDates = [
     context.officialDate,
@@ -781,6 +840,11 @@ async function settleFinalPick(
   const market = getResolvedMarket(pick);
   if (!market) return null;
 
+  if (market !== 'F5' && resolved.kind !== 'final') {
+    console.info(`skipped settlement: game not final ${pick.game_id}`);
+    return null;
+  }
+
   const feed = await fetchMlbJson<MlbLiveFeedResponse>(
     `${MLB_LIVE_API_BASE}/game/${resolved.gamePk}/feed/live`
   );
@@ -804,10 +868,7 @@ async function settleFinalPick(
     return settleF5Market(pick, resolved, feed);
   }
 
-  const abstractStatus = String(feed.gameData?.status?.abstractGameState ?? '');
-  const detailedStatus = String(feed.gameData?.status?.detailedState ?? '');
-
-  if (!(isOfficialFinalStatus(abstractStatus) || isOfficialFinalStatus(detailedStatus))) {
+  if (!isGameFinal(feed.gameData)) {
     console.info(`skipped settlement: game not final ${pick.game_id}`);
     return null;
   }

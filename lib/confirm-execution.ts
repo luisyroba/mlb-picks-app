@@ -1,8 +1,7 @@
 // lib/confirm-execution.ts
 
 import {
-  ExecutionRecommendation,
-  getExecutionConfigForTier
+  ExecutionRecommendation
 } from './choose-best-execution';
 import { MarketLine } from './market-lines';
 
@@ -77,7 +76,6 @@ export function confirmExecution(
   input: ExecutionConfirmationInput
 ): ExecutionConfirmationResult {
   const { recommendation, actualOdds, actualLine, available } = input;
-  const config = getExecutionConfigForTier(recommendation.tier);
 
   if (!recommendation.recommendedLine) {
     return buildNoBet(
@@ -131,17 +129,6 @@ export function confirmExecution(
       recommendation,
       recommendation.alternative1,
       `La cuota ${actualOdds} esta por debajo del piso minimo permitido ${recommendation.minAcceptedOdds}`
-    );
-  }
-
-  if (
-    actualOdds - recommendation.recommendedLine.odds >
-    config.maxPositiveOddsDrift
-  ) {
-    return buildTryNext(
-      recommendation,
-      recommendation.alternative1,
-      `La cuota ${actualOdds} esta demasiado alejada de la referencia ${recommendation.recommendedLine.odds}; revisa que la linea sea exactamente la misma`
     );
   }
 
