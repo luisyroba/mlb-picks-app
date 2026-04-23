@@ -75,6 +75,24 @@ const PICK_COLUMNS = [
   'updated_at'
 ].join(',');
 
+const PICK_ANALYSIS_COLUMNS = [
+  'game_id',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'edge',
+  'ev',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'status',
+  'updated_at'
+].join(',');
+
 const PICK_STORAGE_SAMPLE_COLUMNS = [
   'id',
   'game_id',
@@ -285,6 +303,25 @@ export type PickRow = {
   created_at: string;
   updated_at: string;
 };
+
+export type PickAnalysisSummaryRow = Pick<
+  PickRow,
+  | 'game_id'
+  | 'market'
+  | 'selection'
+  | 'line'
+  | 'odds'
+  | 'confidence'
+  | 'estimated_probability'
+  | 'edge'
+  | 'ev'
+  | 'execution_market'
+  | 'execution_selection'
+  | 'execution_line'
+  | 'execution_odds'
+  | 'status'
+  | 'updated_at'
+>;
 
 export type PickLedgerRow = Pick<PickRow,
   | 'id'
@@ -868,6 +905,31 @@ export async function listConfirmedPicksByGameIds(
   gameIds: string[]
 ): Promise<PickRow[]> {
   return listPicks({ gameIds });
+}
+
+export async function listConfirmedPickAnalysisByGameIds(
+  gameIds: string[]
+): Promise<PickAnalysisSummaryRow[]> {
+  const uniqueIds = uniqueNonEmpty(gameIds);
+  if (!uniqueIds.length) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('picks')
+    .select(PICK_ANALYSIS_COLUMNS)
+    .eq('sport', 'MLB')
+    .in('game_id', uniqueIds);
+
+  if (error) {
+    throw new Error(`Failed to fetch pick analysis summaries: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<PickAnalysisSummaryRow>(data, 'pick analysis summary')
+    : [];
+
+  return rows.filter((pick) => isConfirmedPickRecord(pick));
 }
 
 export async function listPendingConfirmedPicks(): Promise<PickRow[]> {

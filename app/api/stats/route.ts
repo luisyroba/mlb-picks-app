@@ -596,8 +596,7 @@ function summarizeSolidPickHistory(history: SolidPickPoint[]) {
 
   let currentStreakType: 'won' | 'lost' | 'none' = 'none';
   let currentStreakCount = 0;
-  for (let index = settledHistory.length - 1; index >= 0; index -= 1) {
-    const item = settledHistory[index];
+  for (const item of settledHistory) {
     if (item.status !== 'won' && item.status !== 'lost') {
       continue;
     }

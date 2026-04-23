@@ -7,6 +7,7 @@ import {
   formatDateKeyForTimezone,
   formatDateTimeForTimezone
 } from '@/lib/runtime-config';
+import { isGameLive, isPregameGame } from '@/lib/game-feed';
 import { normalizeEntityName } from '@/lib/text-utils';
 import {
   clearSolidPick,
@@ -1938,9 +1939,17 @@ export default function HomePage() {
   const analysisFetchTimesRef = useRef<Map<string, number>>(new Map());
   const analysisRequestsRef = useRef<Map<string, Promise<AnalyzeResponse | null>>>(new Map());
 
+  const consoleGames = useMemo(
+    () => games.filter(isPregameGame),
+    [games]
+  );
+  const liveGames = useMemo(
+    () => games.filter(isGameLive),
+    [games]
+  );
   const selectedGame = useMemo(
-    () => games.find((game) => game.gameId === selectedGameId) ?? null,
-    [games, selectedGameId]
+    () => consoleGames.find((game) => game.gameId === selectedGameId) ?? null,
+    [consoleGames, selectedGameId]
   );
   const analysis = selectedGameId ? analysisByGame[selectedGameId] ?? null : null;
 
@@ -1980,9 +1989,9 @@ export default function HomePage() {
     analysisCacheRef.current = analysisByGame;
   }, [analysisByGame]);
 
-  const liveCount = useMemo(() => games.filter((game) => game.state === 'in').length, [games]);
-  const analyzedCount = useMemo(() => games.filter((game) => game.analysis.analyzed).length, [games]);
-  const confirmedCount = useMemo(() => games.filter((game) => game.analysis.hasActivePick).length, [games]);
+  const liveCount = liveGames.length;
+  const analyzedCount = useMemo(() => consoleGames.filter((game) => game.analysis.analyzed).length, [consoleGames]);
+  const confirmedCount = useMemo(() => consoleGames.filter((game) => game.analysis.hasActivePick).length, [consoleGames]);
   const [solidDailyPick, setSolidDailyPick] = useState<SolidDailyPickState | null>(null);
   const [premiumDayClosed, setPremiumDayClosed] = useState<boolean | null>(null);
   const [statsPremiumPick, setStatsPremiumPick] = useState<StatsPremiumPick | null>(null);
@@ -1999,6 +2008,7 @@ export default function HomePage() {
 
 useEffect(() => {
   let cancelled = false;
+  let intervalId: number | null = null;
 
   async function loadPremiumPick() {
     try {
@@ -2020,12 +2030,19 @@ useEffect(() => {
 
   if (dayOffset === 0) {
     void loadPremiumPick();
+    intervalId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadPremiumPick();
+    }, 180_000);
   }
 
   return () => {
     cancelled = true;
+    if (intervalId !== null) {
+      window.clearInterval(intervalId);
+    }
   };
-}, [dayOffset, games]);
+}, [dayOffset]);
 
 useEffect(() => {
   if (premiumDayClosed === null) return;
@@ -2088,13 +2105,14 @@ useEffect(() => {
       const json = (await res.json()) as GamesResponse;
       if (!res.ok || !json.ok) throw new Error(json.error || 'No se pudieron cargar los juegos');
       const nextGames = json.games ?? [];
+      const nextConsoleGames = nextGames.filter(isPregameGame);
       startTransition(() => {
         setGames(nextGames);
         if (offset === 0) {
           setTodayGamesCache(nextGames);
         }
         setSelectedGameId((current) => {
-          if (current && nextGames.some((game) => game.gameId === current)) return current;
+          if (current && nextConsoleGames.some((game) => game.gameId === current)) return current;
           return null;
         });
       });
@@ -2318,7 +2336,7 @@ useEffect(() => {
   }, []);
 
   useEffect(() => {
-    if (!games.length) return;
+    if (!consoleGames.length) return;
     if (primedDatesRef.current.has(getDateKey(dayOffset))) return;
 
     const win = window as Window & {
@@ -2332,7 +2350,7 @@ useEffect(() => {
     let cancelled = false;
     const run = () => {
       if (!cancelled) {
-        void primeSlate(games, dayOffset);
+        void primeSlate(consoleGames, dayOffset);
       }
     };
 
@@ -2349,7 +2367,7 @@ useEffect(() => {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [games, dayOffset, primeSlate]);
+  }, [consoleGames, dayOffset, primeSlate]);
 
   useEffect(() => {
     if (dayOffset !== 0) return;
@@ -2363,10 +2381,10 @@ useEffect(() => {
   }, [loadGames, dayOffset, liveCount]);
 
   useEffect(() => {
-    if (analysisModalOpen && (!selectedGameId || !games.some((game) => game.gameId === selectedGameId))) {
+    if (analysisModalOpen && (!selectedGameId || !consoleGames.some((game) => game.gameId === selectedGameId))) {
       setAnalysisModalOpen(false);
     }
-  }, [analysisModalOpen, games, selectedGameId]);
+  }, [analysisModalOpen, consoleGames, selectedGameId]);
 
   useEffect(() => {
     if (!analysisModalOpen || !selectedGameId) {
@@ -2535,7 +2553,7 @@ useEffect(() => {
                 <span className="text-[10px] uppercase tracking-[0.24em] text-[var(--ink-muted)]">Slate</span>
               </div>
               <div className="mt-2 flex items-end justify-between gap-3">
-                <div className="text-[1.9rem] font-semibold text-[var(--ink-strong)]">{games.length}</div>
+                <div className="text-[1.9rem] font-semibold text-[var(--ink-strong)]">{consoleGames.length}</div>
                 <div className="text-xs text-[var(--ink-soft)]">{analyzedCount} auditados</div>
               </div>
             </div>
@@ -2550,7 +2568,7 @@ useEffect(() => {
                 <div className="h-2.5 flex-1 rounded-full bg-[var(--surface-soft)]">
                   <div
                     className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#ef4444,#0ea5e9)]"
-                    style={{ width: `${games.length ? (confirmedCount / games.length) * 100 : 0}%` }}
+                    style={{ width: `${consoleGames.length ? (confirmedCount / consoleGames.length) * 100 : 0}%` }}
                   />
                 </div>
               </div>
@@ -2611,18 +2629,18 @@ useEffect(() => {
                 </p>
               </div>
               <div className="rounded-full border border-[var(--line-soft)] bg-white px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-[var(--ink-soft)]">
-                {games.length} juegos
+                {consoleGames.length} juegos
               </div>
             </div>
             )}
 
-            {gamesLoading && !games.length ? (
+            {gamesLoading && !consoleGames.length ? (
               <div className="glass-panel rounded-[1.5rem] p-5 text-sm text-[var(--ink-soft)]">
                 Cargando slate...
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" style={{ contentVisibility: 'auto' }}>
-                {games.map((game) => (
+                {consoleGames.map((game) => (
                   <GameCard
                     key={game.gameId}
                     game={game}
@@ -2632,9 +2650,9 @@ useEffect(() => {
                   />
                 ))}
 
-                {!games.length && !gamesLoading && (
+                {!consoleGames.length && !gamesLoading && (
                   <div className="glass-panel rounded-[1.5rem] p-5 text-sm text-[var(--ink-soft)]">
-                    No hay juegos disponibles en este slate.
+                    No hay juegos pregame disponibles en este slate.
                   </div>
                 )}
               </div>

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getPregameSnapshotsForGames,
-  listConfirmedPicksByGameIds
+  listConfirmedPickAnalysisByGameIds
 } from '@/lib/db';
+import {
+  fetchEspnMlbSummary,
+  normalizeEspnLiveSituation
+} from '@/lib/espn';
+import type { LiveGameSituation } from '@/lib/game-feed';
 
 const ESPN_MLB_SCOREBOARD =
   'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard';
@@ -100,6 +105,7 @@ function getGamePriority(state?: string, completed?: boolean) {
 export async function GET(req: NextRequest) {
   try {
     const date = req.nextUrl.searchParams.get('date');
+    const includeLiveDetails = req.nextUrl.searchParams.get('includeLiveDetails') === '1';
     const url = date
       ? `${ESPN_MLB_SCOREBOARD}?dates=${encodeURIComponent(date)}`
       : ESPN_MLB_SCOREBOARD;
@@ -124,7 +130,7 @@ export async function GET(req: NextRequest) {
       .filter((gameId) => Boolean(gameId));
 
     const [picksRes, snapshotsRes] = await Promise.allSettled([
-      listConfirmedPicksByGameIds(gameIds),
+      listConfirmedPickAnalysisByGameIds(gameIds),
       getPregameSnapshotsForGames(gameIds)
     ]);
 
@@ -166,6 +172,34 @@ export async function GET(req: NextRequest) {
         }
       ])
     );
+
+    const liveSituationByGameId = new Map<string, LiveGameSituation | null>();
+
+    if (includeLiveDetails) {
+      const liveDetails = await Promise.allSettled(
+        events
+          .map((event) => {
+            const statusType = event.competitions?.[0]?.status?.type ?? event.status?.type;
+            const gameId = safeString(event.id);
+
+            if (!gameId || statusType?.state !== 'in' || statusType?.completed) {
+              return null;
+            }
+
+            return gameId;
+          })
+          .filter((gameId): gameId is string => Boolean(gameId))
+          .map(async (gameId) => {
+            const summary = await fetchEspnMlbSummary(gameId);
+            return [gameId, normalizeEspnLiveSituation(summary)] as const;
+          })
+      );
+
+      for (const item of liveDetails) {
+        if (item.status !== 'fulfilled') continue;
+        liveSituationByGameId.set(item.value[0], item.value[1]);
+      }
+    }
 
     const games = await Promise.all(
       events.map(async (event) => {
@@ -216,6 +250,7 @@ export async function GET(req: NextRequest) {
           state: statusType?.state ?? 'pre',
           completed: Boolean(statusType?.completed),
           innings: Math.max(getLineScores(home).length, getLineScores(away).length),
+          liveSituation: liveSituationByGameId.get(event.id ?? '') ?? null,
           homeTeam: {
             name: home?.team?.displayName ?? 'HOME',
             abbr: home?.team?.abbreviation ?? 'HOME',

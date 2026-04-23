@@ -1,5 +1,7 @@
 // lib/espn.ts
 
+import type { LiveGameParticipant, LiveGameSituation } from './game-feed';
+
 const ESPN_MLB_SUMMARY_BASE =
   'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=';
 
@@ -43,10 +45,19 @@ export interface EspnAthlete {
   fullName?: string;
   displayName?: string;
   shortName?: string;
+  headshot?: {
+    href?: string;
+    alt?: string;
+  } | string;
   jersey?: string;
   position?: {
     abbreviation?: string;
     name?: string;
+    displayName?: string;
+  };
+  team?: {
+    id?: string;
+    abbreviation?: string;
     displayName?: string;
   };
   throws?: {
@@ -242,7 +253,18 @@ export interface EspnInjury {
 }
 
 export interface EspnBoxscorePlayerRow {
+  active?: boolean;
   athlete?: EspnAthlete;
+  batOrder?: number;
+  position?: {
+    abbreviation?: string;
+    name?: string;
+    displayName?: string;
+  };
+  notes?: Array<{
+    type?: string;
+    text?: string;
+  }>;
   statistics?: Array<string | number>;
   stats?: Array<string | number>;
   starter?: boolean;
@@ -300,6 +322,7 @@ export interface EspnGamePackage {
   boxscore?: EspnBoxscore;
   injuries?: EspnInjury[];
   format?: EspnFormat;
+  plays?: Array<Record<string, unknown>>;
 }
 
 export interface TeamStatBucket {
@@ -623,6 +646,364 @@ function getProbableStarter(
   };
 }
 
+function clampCount(value: unknown, max: number) {
+  const numeric = toNumber(value);
+  if (numeric === null) return 0;
+  return Math.max(0, Math.min(max, Math.trunc(numeric)));
+}
+
+function readObject(value: unknown): Record<string, unknown> | null {
+  return isObject(value) ? value : null;
+}
+
+function readString(value: unknown): string | null {
+  const parsed = toStringSafe(value).trim();
+  return parsed ? parsed : null;
+}
+
+function readIdentifier(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const parsed = value.trim();
+    return parsed ? parsed : null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return null;
+}
+
+function readHeadshotHref(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    return value;
+  }
+
+  const payload = readObject(value);
+  return readString(payload?.href);
+}
+
+function readNestedNumber(
+  source: Record<string, unknown> | null,
+  keys: string[]
+): number | null {
+  if (!source) return null;
+
+  for (const key of keys) {
+    const value = source[key];
+    const numeric = toNumber(value);
+    if (numeric !== null) return numeric;
+
+    const nested = readObject(value);
+    if (!nested) continue;
+
+    const nestedNumeric =
+      toNumber(nested.value) ??
+      toNumber(nested.displayValue);
+
+    if (nestedNumeric !== null) return nestedNumeric;
+  }
+
+  return null;
+}
+
+function hasTruthyValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value > 0;
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return false;
+    if (['0', 'false', 'empty', 'none', 'no'].includes(normalized)) return false;
+    return true;
+  }
+
+  if (Array.isArray(value)) return value.length > 0;
+  return isObject(value);
+}
+
+function getParticipantStatNote(
+  athlete: Record<string, unknown>,
+  preferredKeys: string[]
+): string | null {
+  const statistics = Array.isArray(athlete.statistics) ? athlete.statistics : [];
+
+  for (const stat of statistics) {
+    if (!isObject(stat)) continue;
+
+    const abbreviation = String(stat.abbreviation ?? '').trim().toUpperCase();
+    const name = String(stat.name ?? '').trim().toUpperCase();
+    const shortName = String(stat.shortDisplayName ?? '').trim().toUpperCase();
+
+    if (!preferredKeys.some((key) => key === abbreviation || key === name || key === shortName)) {
+      continue;
+    }
+
+    const display =
+      readString(stat.displayValue) ??
+      readString(stat.value);
+
+    if (display) {
+      return `${abbreviation || preferredKeys[0]} ${display}`;
+    }
+  }
+
+  return null;
+}
+
+type BoxscoreAthleteSummary = {
+  id: string;
+  name: string;
+  shortName: string | null;
+  teamAbbr: string | null;
+  position: string | null;
+  headshot: string | null;
+  battingNote: string | null;
+  pitchingNote: string | null;
+};
+
+function formatBoxscoreBatterNote(
+  keys: string[],
+  stats: Array<string | number>
+): string | null {
+  const values = new Map<string, string>();
+  keys.forEach((key, index) => {
+    const value = stats[index];
+    if (value === undefined || value === null) return;
+    values.set(key, String(value));
+  });
+
+  const hitsAtBats = values.get('hits-atBats');
+  const runs = values.get('runs');
+  const rbis = values.get('RBIs');
+
+  if (!hitsAtBats) return null;
+
+  const extras = [
+    runs && runs !== '0' ? `${runs} R` : null,
+    rbis && rbis !== '0' ? `${rbis} RBI` : null
+  ].filter(Boolean);
+
+  return extras.length ? `${hitsAtBats}, ${extras.join(', ')}` : hitsAtBats;
+}
+
+function formatBoxscorePitcherNote(
+  keys: string[],
+  stats: Array<string | number>
+): string | null {
+  const values = new Map<string, string>();
+  keys.forEach((key, index) => {
+    const value = stats[index];
+    if (value === undefined || value === null) return;
+    values.set(key, String(value));
+  });
+
+  const innings = values.get('fullInnings.partInnings');
+  const hits = values.get('hits');
+  const earnedRuns = values.get('earnedRuns');
+  const walks = values.get('walks');
+  const strikeouts = values.get('strikeouts');
+  const pitches = values.get('pitches');
+
+  const parts = [
+    innings ? `${innings} IP` : null,
+    hits ? `${hits} H` : null,
+    earnedRuns ? `${earnedRuns} ER` : null,
+    walks ? `${walks} BB` : null,
+    strikeouts ? `${strikeouts} K` : null,
+    pitches ? `${pitches} P` : null
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(', ') : null;
+}
+
+function buildBoxscoreAthleteLookup(summary: EspnGamePackage) {
+  const lookup = new Map<string, BoxscoreAthleteSummary>();
+
+  for (const teamBlock of summary.boxscore?.players ?? []) {
+    const teamAbbr = teamBlock.team?.abbreviation ?? null;
+
+    for (const statBlock of teamBlock.statistics ?? []) {
+      const sectionType = statBlock.type ?? statBlock.name ?? '';
+      const keys = statBlock.keys ?? [];
+
+      for (const row of statBlock.athletes ?? []) {
+        const athleteId = readIdentifier(row.athlete?.id);
+        if (!athleteId) continue;
+
+        const existing = lookup.get(athleteId);
+        const stats = Array.isArray(row.stats)
+          ? row.stats
+          : Array.isArray(row.statistics)
+            ? row.statistics
+            : [];
+        const position =
+          row.position?.abbreviation ??
+          row.position?.displayName ??
+          row.position?.name ??
+          row.athlete?.position?.abbreviation ??
+          row.athlete?.position?.displayName ??
+          row.athlete?.position?.name ??
+          null;
+
+        const summaryRow: BoxscoreAthleteSummary = {
+          id: athleteId,
+          name:
+            row.athlete?.displayName ??
+            row.athlete?.fullName ??
+            existing?.name ??
+            'Unknown',
+          shortName: row.athlete?.shortName ?? existing?.shortName ?? null,
+          teamAbbr,
+          position,
+          headshot: readHeadshotHref(row.athlete?.headshot) ?? existing?.headshot ?? null,
+          battingNote:
+            sectionType === 'batting'
+              ? formatBoxscoreBatterNote(keys, stats)
+              : existing?.battingNote ?? null,
+          pitchingNote:
+            sectionType === 'pitching'
+              ? formatBoxscorePitcherNote(keys, stats)
+              : existing?.pitchingNote ?? null
+        };
+
+        lookup.set(athleteId, summaryRow);
+      }
+    }
+  }
+
+  return lookup;
+}
+
+function normalizeLiveParticipant(
+  value: unknown,
+  preferredStatKeys: string[],
+  athleteLookup?: Map<string, BoxscoreAthleteSummary>,
+  role?: 'batter' | 'pitcher'
+): LiveGameParticipant | null {
+  const outer = readObject(value);
+  if (!outer) return null;
+
+  const athlete = readObject(outer.athlete) ?? outer;
+  const athleteId = readIdentifier(athlete.id) ?? readIdentifier(outer.id);
+  const lookup = athleteId ? athleteLookup?.get(athleteId) : null;
+  const name =
+    readString(athlete.displayName) ??
+    readString(athlete.fullName) ??
+    readString(athlete.shortName) ??
+    lookup?.name ??
+    lookup?.shortName;
+
+  if (!name) return null;
+
+  const team = readObject(athlete.team) ?? readObject(outer.team);
+  const position = readObject(athlete.position) ?? readObject(outer.position);
+
+  return {
+    id: athleteId,
+    name,
+    shortName: readString(athlete.shortName) ?? lookup?.shortName ?? null,
+    teamAbbr: readString(team?.abbreviation) ?? lookup?.teamAbbr ?? null,
+    position:
+      readString(position?.abbreviation) ??
+      readString(position?.displayName) ??
+      readString(position?.name) ??
+      lookup?.position ??
+      null,
+    headshot:
+      readHeadshotHref(athlete.headshot) ??
+      readHeadshotHref(outer.headshot) ??
+      lookup?.headshot ??
+      null,
+    note:
+      (role === 'pitcher' ? lookup?.pitchingNote : role === 'batter' ? lookup?.battingNote : null) ??
+      getParticipantStatNote(athlete, preferredStatKeys)
+  };
+}
+
+function getLatestMeaningfulPlay(summary: EspnGamePackage) {
+  const plays = Array.isArray(summary.plays) ? summary.plays : [];
+  const latestPlay = plays.at(-1) ?? null;
+  const latestParticipantPlay =
+    [...plays].reverse().find((play) => Array.isArray(play?.participants) && play.participants.length > 0) ?? null;
+
+  return {
+    latestPlay: readObject(latestPlay),
+    latestParticipantPlay: readObject(latestParticipantPlay)
+  };
+}
+
+function getPlayCountValue(
+  play: Record<string, unknown> | null,
+  field: 'balls' | 'strikes'
+) {
+  const resultCount = readObject(play?.resultCount);
+  const pitchCount = readObject(play?.pitchCount);
+
+  return clampCount(
+    readNestedNumber(resultCount, [field]) ??
+      readNestedNumber(pitchCount, [field]),
+    field === 'balls' ? 4 : 3
+  );
+}
+
+function getPlayOuts(play: Record<string, unknown> | null) {
+  return clampCount(readNestedNumber(play, ['outs']), 3);
+}
+
+function getPlayParticipant(
+  play: Record<string, unknown> | null,
+  type: string
+) {
+  const participants = Array.isArray(play?.participants) ? play.participants : [];
+  const participant = participants.find((item) => {
+    const payload = readObject(item);
+    return readString(payload?.type)?.toLowerCase() === type.toLowerCase();
+  });
+
+  return readObject(participant);
+}
+
+function getPlayBaseOccupied(
+  play: Record<string, unknown> | null,
+  base: 1 | 2 | 3
+) {
+  if (!play) return false;
+
+  const key = base === 1 ? 'onFirst' : base === 2 ? 'onSecond' : 'onThird';
+  if (key in play) {
+    return hasTruthyValue(play[key]);
+  }
+
+  const participantType = key.toLowerCase();
+  return Boolean(getPlayParticipant(play, participantType));
+}
+
+function hasOwnKey(
+  source: Record<string, unknown> | null,
+  key: string
+) {
+  return Boolean(source) && Object.prototype.hasOwnProperty.call(source, key);
+}
+
+function getLatestBaseStatePlay(summary: EspnGamePackage) {
+  const plays = Array.isArray(summary.plays) ? summary.plays : [];
+
+  const latestWithBaseState = [...plays].reverse().find((play) => {
+    const payload = readObject(play);
+    if (!payload) return false;
+
+    return (
+      hasOwnKey(payload, 'onFirst') ||
+      hasOwnKey(payload, 'onSecond') ||
+      hasOwnKey(payload, 'onThird') ||
+      hasOwnKey(payload, 'runners')
+    );
+  });
+
+  return readObject(latestWithBaseState);
+}
+
 function normalizeCompetitor(
   competitor: EspnCompetitor,
   fallbackHomeAway: 'home' | 'away',
@@ -747,6 +1128,79 @@ export function normalizeEspnGameData(summary: EspnGamePackage): NormalizedGameD
     injuries: summary.injuries ?? [],
     raw: summary
   };
+}
+
+export function normalizeEspnLiveSituation(
+  summary: EspnGamePackage
+): LiveGameSituation | null {
+  const competition = summary.header?.competitions?.[0];
+  if (!competition) {
+    return null;
+  }
+
+  const athleteLookup = buildBoxscoreAthleteLookup(summary);
+  const { latestPlay, latestParticipantPlay } = getLatestMeaningfulPlay(summary);
+  const activePlay = latestPlay ?? latestParticipantPlay;
+  const participantPlay = latestParticipantPlay ?? latestPlay;
+  const baseStatePlay = getLatestBaseStatePlay(summary) ?? activePlay;
+  const lastPlayText =
+    readString(activePlay?.text) ??
+    readString(participantPlay?.text);
+  const batter =
+    normalizeLiveParticipant(
+      getPlayParticipant(participantPlay, 'batter'),
+      ['AVG', 'OPS'],
+      athleteLookup,
+      'batter'
+    ) ??
+    normalizeLiveParticipant(
+      getPlayParticipant(activePlay, 'batter'),
+      ['AVG', 'OPS'],
+      athleteLookup,
+      'batter'
+    );
+  const pitcher =
+    normalizeLiveParticipant(
+      getPlayParticipant(participantPlay, 'pitcher'),
+      ['ERA', 'WHIP'],
+      athleteLookup,
+      'pitcher'
+    ) ??
+    normalizeLiveParticipant(
+      getPlayParticipant(activePlay, 'pitcher'),
+      ['ERA', 'WHIP'],
+      athleteLookup,
+      'pitcher'
+    );
+
+  const liveSituation: LiveGameSituation = {
+    venueName:
+      readString(summary.gameInfo?.venue?.fullName) ??
+      readString(competition.venue?.fullName),
+    lastPlay: lastPlayText,
+    balls: getPlayCountValue(activePlay, 'balls'),
+    strikes: getPlayCountValue(activePlay, 'strikes'),
+    outs: getPlayOuts(activePlay),
+    onFirst: getPlayBaseOccupied(baseStatePlay, 1),
+    onSecond: getPlayBaseOccupied(baseStatePlay, 2),
+    onThird: getPlayBaseOccupied(baseStatePlay, 3),
+    batter,
+    pitcher
+  };
+
+  const hasMeaningfulState =
+    Boolean(liveSituation.venueName) ||
+    Boolean(liveSituation.lastPlay) ||
+    liveSituation.balls > 0 ||
+    liveSituation.strikes > 0 ||
+    liveSituation.outs > 0 ||
+    liveSituation.onFirst ||
+    liveSituation.onSecond ||
+    liveSituation.onThird ||
+    Boolean(liveSituation.batter) ||
+    Boolean(liveSituation.pitcher);
+
+  return hasMeaningfulState ? liveSituation : null;
 }
 
 /**

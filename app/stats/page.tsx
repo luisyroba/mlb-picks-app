@@ -7,7 +7,6 @@ import {
   type PersistedSolidPick
 } from '@/lib/solid-pick-client';
 import {
-  LIVE_STATS_CUTOFF_DATE_KEY,
   USER_TIMEZONE,
   formatDateKeyForTimezone,
 } from '@/lib/runtime-config';
@@ -456,23 +455,6 @@ function resolveMatchupLabel(
 function formatStreak(streak?: { type: 'won' | 'lost'; count: number } | null) {
   if (!streak) return '-';
   return `${streak.type === 'won' ? 'W' : 'L'}${streak.count}`;
-}
-
-function getRecentDateKey(item: RecentItem) {
-  const date = parseUiDate(item.gameDate ?? item.createdAt);
-  if (!date) return null;
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: USER_TIMEZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).format(date);
-}
-
-function getRecentMode(item: RecentItem): 'testing' | 'live' | null {
-  const dateKey = getRecentDateKey(item);
-  if (!dateKey) return null;
-  return dateKey >= LIVE_STATS_CUTOFF_DATE_KEY ? 'live' : 'testing';
 }
 
 function getPremiumRankFrame(rank: 1 | 2 | 3) {
@@ -962,12 +944,6 @@ const selectedScopeLabel =
   selectedDataMode === 'testing'
     ? 'Testing'
     : selectedLiveView?.label ?? 'Live';
-const selectedScopeDescription =
-  selectedDataMode === 'testing'
-    ? `Histórico previo al corte ${display?.cutoffDate ?? LIVE_STATS_CUTOFF_DATE_KEY}`
-    : selectedLiveView?.startDate && selectedLiveView?.endDate
-      ? `Live desde ${selectedLiveView.startDate} hasta ${selectedLiveView.endDate}`
-      : `Live desde ${display?.cutoffDate ?? LIVE_STATS_CUTOFF_DATE_KEY}`;
 const isLiveCurrentPeriod =
   selectedDataMode === 'live' && Boolean(selectedLiveView?.isCurrent);
 
@@ -1223,8 +1199,12 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
               <section className="relative overflow-hidden rounded-[1.7rem] border border-[#ead18f]/45 bg-[linear-gradient(145deg,rgba(255,248,224,0.92),rgba(255,255,255,0.98))] p-4 shadow-[0_18px_44px_rgba(160,126,50,0.14)]">
                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,221,136,0.25),transparent_46%),radial-gradient(circle_at_bottom_right,rgba(189,146,53,0.14),transparent_34%)]" />
                 <div className="relative">
-                  <div className="text-[10px] uppercase tracking-[0.24em] text-[#9b771c]">{selectedScopeLabel}</div>
-                  <h3 className="mt-0.5 font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Sistema premium</h3>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="font-heading text-[1.35rem] font-semibold text-[var(--ink-strong)]">Sistema premium</h3>
+                    <div className="rounded-full border border-[var(--line-soft)] bg-white px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-[var(--ink-soft)]">
+                      {selectedScopeLabel}
+                    </div>
+                  </div>
 
                   <div className="mt-3 space-y-3">
                     {premiumRankCards.map((entry) => {
@@ -1232,8 +1212,7 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
 
                       return (
                         <div key={`premium-rank-card-${entry.rank}`} className={`rounded-[1.2rem] border p-3 ${frame.shell}`}>
-                          <div className={`text-[10px] uppercase tracking-[0.18em] ${frame.label}`}>Top #{entry.rank}</div>
-                          <div className="mt-2 grid grid-cols-2 gap-2 xl:grid-cols-4">
+                          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
                             <div className={`rounded-[1.05rem] p-2.5 ${frame.hero}`}>
                               <div className="text-[10px] uppercase tracking-[0.16em] text-current/60">Record</div>
                               <div className="mt-1 text-lg font-semibold">{entry.summary.won}/{entry.summary.total}</div>
