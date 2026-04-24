@@ -179,6 +179,7 @@ type StatsPremiumPick = {
 
 type HomePremiumResponse = {
   ok?: boolean;
+  error?: string;
   isLocked?: boolean;
   isClosed?: boolean;
   premiumPick?: StatsPremiumPick | null;
