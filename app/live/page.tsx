@@ -2,37 +2,73 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
-import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, startTransition, useCallback, useEffect, useMemo, useState } from 'react';
+import { ManualSettlePopover } from '@/app/_components/manual-settle-popover';
 import { isGameLive, type GameFeedItem, type GamesResponse, type LiveGameParticipant } from '@/lib/game-feed';
+import { settlePickManually, type ManualSettleStatus } from '@/lib/manual-settle-client';
 import { formatDateKeyForTimezone } from '@/lib/runtime-config';
 
-const LIVE_SETTLEMENT_REFRESH_MS = 30_000;
+const LIVE_INITIAL_REQUEST_DEDUPE_MS = 2_500;
 
-type LiveSettlementResponse = {
-  ok: boolean;
-  startedAt: string;
-  finishedAt: string;
-  revertedCount: number;
-  settledCount: number;
-  backfilledCount: number;
-  error?: string;
+type LiveGamesRequestState = {
+  key: string | null;
+  promise: Promise<GamesResponse> | null;
+  value: GamesResponse | null;
+  valueAt: number;
 };
 
-function formatRunTime(value?: string | null): string {
-  if (!value) {
-    return 'Sin ejecucion';
+const liveGamesRequestState: LiveGamesRequestState = {
+  key: null,
+  promise: null,
+  value: null,
+  valueAt: 0
+};
+
+async function runLiveGamesRequest(
+  key: string,
+  loader: () => Promise<GamesResponse>,
+  options?: { bypassRecentCache?: boolean }
+) {
+  const bypassRecentCache = options?.bypassRecentCache ?? false;
+  const now = Date.now();
+
+  if (liveGamesRequestState.key === key) {
+    if (liveGamesRequestState.promise) {
+      return liveGamesRequestState.promise;
+    }
+
+    if (
+      !bypassRecentCache &&
+      liveGamesRequestState.value !== null &&
+      now - liveGamesRequestState.valueAt < LIVE_INITIAL_REQUEST_DEDUPE_MS
+    ) {
+      return liveGamesRequestState.value;
+    }
+  } else {
+    liveGamesRequestState.key = key;
+    liveGamesRequestState.promise = null;
+    liveGamesRequestState.value = null;
+    liveGamesRequestState.valueAt = 0;
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return 'Sin ejecucion';
-  }
+  const request = loader()
+    .then((value) => {
+      if (liveGamesRequestState.key === key) {
+        liveGamesRequestState.value = value;
+        liveGamesRequestState.valueAt = Date.now();
+      }
+      return value;
+    })
+    .finally(() => {
+      if (liveGamesRequestState.key === key && liveGamesRequestState.promise === request) {
+        liveGamesRequestState.promise = null;
+      }
+    });
 
-  return date.toLocaleString('es-CL', {
-    dateStyle: 'medium',
-    timeStyle: 'short'
-  });
+  liveGamesRequestState.promise = request;
+  return request;
 }
+
 
 function formatOdds(value?: number | null) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : null;
@@ -287,11 +323,63 @@ const ParticipantStrip = memo(function ParticipantStrip({
   );
 });
 
-const LiveGameCard = memo(function LiveGameCard({ game }: { game: GameFeedItem }) {
+const LiveGameCard = memo(function LiveGameCard({
+  game,
+  popoverOpen,
+  settleLoading,
+  settleError,
+  onTogglePopover,
+  onClosePopover,
+  onSettle
+}: {
+  game: GameFeedItem;
+  popoverOpen: boolean;
+  settleLoading: boolean;
+  settleError: string | null;
+  onTogglePopover: (pickId: string) => void;
+  onClosePopover: () => void;
+  onSettle: (pickId: string, status: ManualSettleStatus) => void;
+}) {
   const liveSituation = game.liveSituation;
+  const pickId = game.analysis.pickId ?? null;
+  const canSettle = game.analysis.status === 'pending' && Boolean(pickId);
+
+  const handleToggle = () => {
+    if (!pickId || !canSettle) return;
+    onTogglePopover(pickId);
+  };
 
   return (
-    <article className="glass-panel overflow-hidden rounded-[1.65rem] p-4 shadow-[0_24px_60px_rgba(9,28,57,0.1)]">
+    <article
+      className={`glass-panel relative rounded-[1.65rem] p-4 shadow-[0_24px_60px_rgba(9,28,57,0.1)] transition ${
+        canSettle
+          ? 'cursor-pointer hover:-translate-y-[1px] hover:shadow-[0_28px_64px_rgba(9,28,57,0.14)]'
+          : 'overflow-hidden'
+      }`}
+      onClick={handleToggle}
+      onKeyDown={(event) => {
+        if (!canSettle) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleToggle();
+        }
+      }}
+      role={canSettle ? 'button' : undefined}
+      tabIndex={canSettle ? 0 : undefined}
+      aria-expanded={canSettle ? popoverOpen : undefined}
+    >
+      <ManualSettlePopover
+        open={popoverOpen}
+        pending={canSettle}
+        loading={settleLoading}
+        error={settleError}
+        onClose={onClosePopover}
+        onSettle={(status) => {
+          if (!pickId) return;
+          onSettle(pickId, status);
+        }}
+      />
+
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-700">
@@ -395,53 +483,19 @@ const LiveGameCard = memo(function LiveGameCard({ game }: { game: GameFeedItem }
 });
 
 export default function LivePage() {
-  const [runState, setRunState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
-  const [summary, setSummary] = useState<LiveSettlementResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [games, setGames] = useState<GameFeedItem[]>([]);
-  const [gamesLoading, setGamesLoading] = useState(true);
-  const [gamesError, setGamesError] = useState<string | null>(null);
+const [games, setGames] = useState<GameFeedItem[]>([]);
+const [gamesLoading, setGamesLoading] = useState(true);
+const [gamesError, setGamesError] = useState<string | null>(null);
+const [openPickId, setOpenPickId] = useState<string | null>(null);
+const [settlingPickId, setSettlingPickId] = useState<string | null>(null);
+const [settleError, setSettleError] = useState<string | null>(null);
 
-  const settlementInFlightRef = useRef(false);
-  const gamesAbortRef = useRef<AbortController | null>(null);
-
-  const runSettlementSweep = useCallback(async (silent = false) => {
-    if (settlementInFlightRef.current) {
-      return;
-    }
-
-    settlementInFlightRef.current = true;
-
-    if (!silent) {
-      setRunState('loading');
-    }
-    setError(null);
-
-    try {
-      const response = await fetch('/api/live/settlement', {
-        method: 'POST',
-        cache: 'no-store'
-      });
-      const payload = (await response.json()) as LiveSettlementResponse;
-
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || 'No se pudo ejecutar el autosettlement live.');
-      }
-
-      setSummary(payload);
-      setRunState('success');
-    } catch (caughtError) {
-      setRunState('error');
-      setError(caughtError instanceof Error ? caughtError.message : 'No se pudo ejecutar el autosettlement live.');
-    } finally {
-      settlementInFlightRef.current = false;
-    }
-  }, []);
-
-  const loadLiveGames = useCallback(async (silent = false) => {
-    gamesAbortRef.current?.abort();
-    const controller = new AbortController();
-    gamesAbortRef.current = controller;
+  const loadLiveGames = useCallback(async (
+    silent = false,
+    options?: { bypassRecentCache?: boolean }
+  ) => {
+    const dateKey = formatDateKeyForTimezone(0);
+    const requestKey = `live:${dateKey}`;
 
     if (!silent) {
       setGamesLoading(true);
@@ -449,68 +503,104 @@ export default function LivePage() {
     setGamesError(null);
 
     try {
-      const response = await fetch(
-        `/api/games?date=${formatDateKeyForTimezone(0)}&includeLiveDetails=1`,
-        {
-          cache: 'no-store',
-          signal: controller.signal
-        }
-      );
-      const payload = (await response.json()) as GamesResponse;
+      const payload = await runLiveGamesRequest(
+        requestKey,
+        async () => {
+          const response = await fetch(
+            `/api/games?date=${dateKey}&includeLiveDetails=1`,
+            {
+              cache: 'no-store',
+              headers: {
+                'x-origin-hint': 'live-page'
+              }
+            }
+          );
+          const json = (await response.json()) as GamesResponse;
 
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || 'No se pudo cargar el tablero live.');
-      }
+          if (!response.ok || !json.ok) {
+            throw new Error(json.error || 'No se pudo cargar el tablero live.');
+          }
+
+          return json;
+        },
+        options
+      );
 
       startTransition(() => {
         setGames(payload.games ?? []);
       });
     } catch (caughtError) {
-      if (caughtError instanceof Error && caughtError.name === 'AbortError') {
-        return;
-      }
-
       setGamesError(caughtError instanceof Error ? caughtError.message : 'No se pudo cargar el tablero live.');
     } finally {
-      if (gamesAbortRef.current === controller) {
-        gamesAbortRef.current = null;
-        setGamesLoading(false);
-      }
+      setGamesLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    void Promise.allSettled([runSettlementSweep(), loadLiveGames()]);
+useEffect(() => {
+  void loadLiveGames();
 
-    return () => {
-      gamesAbortRef.current?.abort();
-    };
-  }, [loadLiveGames, runSettlementSweep]);
+  return () => {
+  };
+}, [loadLiveGames]);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') {
-        return;
-      }
+const handleTogglePopover = useCallback((pickId: string) => {
+  setSettleError(null);
+  setOpenPickId((current) => (current === pickId ? null : pickId));
+}, []);
 
-      void Promise.allSettled([runSettlementSweep(true), loadLiveGames(true)]);
-    }, LIVE_SETTLEMENT_REFRESH_MS);
+const handleSettle = useCallback(async (pickId: string, status: ManualSettleStatus) => {
+  try {
+    setSettlingPickId(pickId);
+    setSettleError(null);
 
-    return () => window.clearInterval(interval);
-  }, [loadLiveGames, runSettlementSweep]);
+    const payload = await settlePickManually(pickId, status, 'live-manual-settle');
+
+    startTransition(() => {
+      setGames((current) =>
+        current.map((game) =>
+          game.analysis.pickId === pickId
+            ? {
+                ...game,
+                analysis: {
+                  ...game.analysis,
+                  status: payload.pick.status
+                }
+              }
+            : game
+        )
+      );
+    });
+
+    setOpenPickId(null);
+    void loadLiveGames(true, { bypassRecentCache: true });
+  } catch (caughtError) {
+    setSettleError(
+      caughtError instanceof Error
+        ? caughtError.message
+        : 'No se pudo cerrar el pick manualmente.'
+    );
+  } finally {
+    setSettlingPickId(null);
+  }
+}, [loadLiveGames]);
+
+useEffect(() => {
+  const interval = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') {
+      return;
+    }
+
+    void loadLiveGames(true);
+  }, 30_000);
+
+  return () => window.clearInterval(interval);
+}, [loadLiveGames]);
 
   const liveGames = useMemo(
     () => games.filter(isGameLive),
     [games]
   );
   const liveCount = liveGames.length;
-  const totalTouched = useMemo(() => {
-    if (!summary) {
-      return 0;
-    }
-
-    return summary.revertedCount + summary.settledCount + summary.backfilledCount;
-  }, [summary]);
 
   return (
     <main className="px-3 pb-8 pt-4 lg:px-5">
@@ -526,30 +616,30 @@ export default function LivePage() {
                   <span className="rounded-full border border-[rgba(9,28,57,0.08)] bg-white px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--ink-soft)]">
                     {formatCountBadge(liveCount)}
                   </span>
-                  <span className="rounded-full border border-[rgba(9,28,57,0.08)] bg-white px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--ink-soft)]">
-                    Settlement cada 30s
-                  </span>
+<span className="rounded-full border border-[rgba(9,28,57,0.08)] bg-white px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--ink-soft)]">
+  Auto refresh 30s
+</span>
                 </div>
-                <h1 className="mt-3 font-heading text-[2rem] font-semibold leading-none text-[var(--ink-strong)]">
-                  Juegos en vivo y settlement operativo
-                </h1>
-                <p className="mt-3 text-sm text-[var(--ink-soft)]">
-                  Console conserva solo el slate pregame. Cuando un juego entra en vivo aparece aqui con su pick vigente,
-                  conteo, bases, pitcher y bateador, mientras esta misma vista sigue corriendo el autosettlement.
-                </p>
+<h1 className="mt-3 font-heading text-[2rem] font-semibold leading-none text-[var(--ink-strong)]">
+  Juegos en vivo
+</h1>
+<p className="mt-3 text-sm text-[var(--ink-soft)]">
+  Console conserva solo el slate pregame. Cuando un juego entra en vivo aparece aqui con su pick vigente,
+  conteo, bases, pitcher y bateador. El resultado won/lost se marca manualmente.
+</p>
               </div>
 
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <button
-                  type="button"
-                  onClick={() => {
-                    void Promise.allSettled([runSettlementSweep(), loadLiveGames()]);
-                  }}
-                  className="rounded-full bg-[var(--surface-navy)] px-4 py-2 text-sm font-semibold text-white shadow-[0_18px_38px_rgba(9,28,57,0.18)] transition hover:bg-[rgba(9,28,57,0.92)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={runState === 'loading' || gamesLoading}
-                >
-                  {runState === 'loading' || gamesLoading ? 'Actualizando...' : 'Actualizar live'}
-                </button>
+  type="button"
+  onClick={() => {
+    void loadLiveGames();
+  }}
+  className="..."
+  disabled={gamesLoading}
+>
+  {gamesLoading ? 'Actualizando...' : 'Actualizar live'}
+</button>
                 <Link
                   href="/"
                   className="rounded-full border border-[var(--line-soft)] bg-white px-4 py-2 text-sm font-medium text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)]"
@@ -574,45 +664,34 @@ export default function LivePage() {
                 <span className={liveCount > 0 ? 'text-rose-700' : 'text-[var(--ink-muted)]'}>
                   {liveCount > 0 ? `Hay ${liveCount} juego${liveCount === 1 ? '' : 's'} en vivo en este momento` : 'Esperando el primer pitch'}
                 </span>
-                <span className="text-[var(--ink-muted)]">
-                  Estado {runState === 'error' ? 'error' : runState === 'success' ? 'activo' : runState === 'loading' ? 'ejecutando' : 'en espera'}
-                </span>
-                <span className="text-[var(--ink-muted)]">Board auto refresh 30s</span>
+<span className="text-[var(--ink-muted)]">
+  Estado {gamesError ? 'error' : gamesLoading ? 'actualizando' : 'activo'}
+</span>
+<span className="text-[var(--ink-muted)]">Board auto refresh 30s</span>
               </div>
             </div>
           </div>
         </section>
 
-        <section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <article className="navy-panel flex min-h-[92px] flex-col justify-between rounded-[1.2rem] px-4 py-3 text-white">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-white/62">Juegos live</div>
-            <div className="text-[1.75rem] font-semibold">{liveCount}</div>
-          </article>
-          <article className="glass-panel rounded-[1.2rem] p-4">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Ultima corrida</div>
-            <div className="mt-2 text-base font-semibold text-[var(--ink-strong)]">
-              {formatRunTime(summary?.finishedAt)}
-            </div>
-          </article>
-          <article className="glass-panel rounded-[1.2rem] p-4">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Liquidados</div>
-            <div className="mt-2 text-[1.75rem] font-semibold text-[var(--ink-strong)]">
-              {summary?.settledCount ?? 0}
-            </div>
-          </article>
-          <article className="glass-panel rounded-[1.2rem] p-4">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Barrido total</div>
-            <div className="mt-2 text-[1.75rem] font-semibold text-[var(--ink-strong)]">
-              {totalTouched}
-            </div>
-          </article>
-        </section>
+<section className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
+  <article className="navy-panel flex min-h-[92px] flex-col justify-between rounded-[1.2rem] px-4 py-3 text-white">
+    <div className="text-[10px] uppercase tracking-[0.2em] text-white/62">Juegos live</div>
+    <div className="text-[1.75rem] font-semibold">{liveCount}</div>
+  </article>
 
-        {(error || gamesError) && (
-          <div className="glass-panel mt-4 rounded-[1.25rem] p-4 text-sm text-rose-700">
-            {gamesError ?? error}
-          </div>
-        )}
+  <article className="glass-panel rounded-[1.2rem] p-4">
+    <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">Actualización</div>
+    <div className="mt-2 text-base font-semibold text-[var(--ink-strong)]">
+      Automática cada 30 segundos
+    </div>
+  </article>
+</section>
+
+{gamesError && (
+  <div className="glass-panel mt-4 rounded-[1.25rem] p-4 text-sm text-rose-700">
+    {gamesError}
+  </div>
+)}
 
         <section className="mt-4">
           {gamesLoading && !liveGames.length ? (
@@ -637,7 +716,20 @@ export default function LivePage() {
           ) : (
             <div className="grid gap-4 lg:grid-cols-2" style={{ contentVisibility: 'auto' }}>
               {liveGames.map((game) => (
-                <LiveGameCard key={game.gameId} game={game} />
+                <LiveGameCard
+                  key={game.gameId}
+                  game={game}
+                  popoverOpen={Boolean(game.analysis.pickId) && openPickId === game.analysis.pickId}
+                  settleLoading={Boolean(game.analysis.pickId) && settlingPickId === game.analysis.pickId}
+                  settleError={
+                    Boolean(game.analysis.pickId) && openPickId === game.analysis.pickId
+                      ? settleError
+                      : null
+                  }
+                  onTogglePopover={handleTogglePopover}
+                  onClosePopover={() => setOpenPickId(null)}
+                  onSettle={handleSettle}
+                />
               ))}
             </div>
           )}

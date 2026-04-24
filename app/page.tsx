@@ -9,10 +9,6 @@ import {
 } from '@/lib/runtime-config';
 import { isGameLive, isPregameGame } from '@/lib/game-feed';
 import { normalizeEntityName } from '@/lib/text-utils';
-import {
-  clearSolidPick,
-  type PersistedSolidPick
-} from '@/lib/solid-pick-client';
 import type { LayerAOutput, NormalizedGameData } from '@/lib/types';
 
 type TeamSummary = {
@@ -148,9 +144,22 @@ type CardMeta = {
   odds: number | null;
 };
 
-type SolidDailyPickState = PersistedSolidPick & {
+type SolidDailyPickState = {
+  dateKey: string;
+  gameId: string;
+  gameLabel: string;
   market: ExecutionLine['marketType'];
+  selection: string;
+  line: number | null;
   odds: number;
+  confidence: string;
+  score: number;
+  edge: number | null;
+  ev: number | null;
+  note?: string | null;
+  lockedAt: string;
+  settledStatus?: 'won' | 'lost' | 'void';
+  profitUnits?: number | null;
   game: GameRow | null;
 };
 
@@ -168,14 +177,94 @@ type StatsPremiumPick = {
   note?: string | null;
 };
 
-type HomeStatsResponse = {
+type HomePremiumResponse = {
   ok?: boolean;
-  solidPick?: {
-    premiumPick?: StatsPremiumPick | null;
-  };
+  isLocked?: boolean;
+  isClosed?: boolean;
+  premiumPick?: StatsPremiumPick | null;
 };
 const ANALYSIS_CACHE_MAX_AGE_MS = 60_000;
-const ANALYSIS_MODAL_REFRESH_MS = 15_000;
+const ANALYSIS_MODAL_REFRESH_MS = 60_000;
+const INITIAL_REQUEST_DEDUPE_MS = 2_500;
+
+type SharedRequestState<T> = {
+  key: string | null;
+  promise: Promise<T> | null;
+  value: T | null;
+  valueAt: number;
+};
+
+const homePremiumRequestState: SharedRequestState<HomePremiumResponse> = {
+  key: null,
+  promise: null,
+  value: null,
+  valueAt: 0
+};
+
+const homeGamesRequestStates = new Map<string, SharedRequestState<GamesResponse>>();
+
+function getSharedRequestState<T>(
+  store: Map<string, SharedRequestState<T>>,
+  key: string
+): SharedRequestState<T> {
+  const existing = store.get(key);
+  if (existing) return existing;
+
+  const created: SharedRequestState<T> = {
+    key,
+    promise: null,
+    value: null,
+    valueAt: 0
+  };
+  store.set(key, created);
+  return created;
+}
+
+async function runSharedRequest<T>(
+  state: SharedRequestState<T>,
+  key: string,
+  loader: () => Promise<T>,
+  options?: { bypassRecentCache?: boolean }
+) {
+  const bypassRecentCache = options?.bypassRecentCache ?? false;
+  const now = Date.now();
+
+  if (state.key === key) {
+    if (state.promise) {
+      return state.promise;
+    }
+
+    if (
+      !bypassRecentCache &&
+      state.value !== null &&
+      now - state.valueAt < INITIAL_REQUEST_DEDUPE_MS
+    ) {
+      return state.value;
+    }
+  } else {
+    state.key = key;
+    state.promise = null;
+    state.value = null;
+    state.valueAt = 0;
+  }
+
+  const request = loader()
+    .then((value) => {
+      if (state.key === key) {
+        state.value = value;
+        state.valueAt = Date.now();
+      }
+      return value;
+    })
+    .finally(() => {
+      if (state.key === key && state.promise === request) {
+        state.promise = null;
+      }
+    });
+
+  state.promise = request;
+  return request;
+}
 
 function ClockIcon() {
   return (
@@ -332,10 +421,6 @@ function getDateKey(offset = 0) {
   return formatDateKeyForTimezone(offset);
 }
 
-function getSolidStorageDateKey(offset = 0) {
-  return formatDateKeyForTimezone(offset, { dashed: true });
-}
-
 function isTotalMarketLabel(selection: string, market?: string | null) {
   const normalized = selection.trim().toLowerCase();
   return (
@@ -364,6 +449,17 @@ function renderPickLabel(selection: string, line?: number | null, market?: strin
 function renderLineBadgeText(selection: string, line?: number | null, market?: string | null) {
   if (typeof line !== 'number' || !Number.isFinite(line)) return 'Sin linea';
   return `Linea ${formatDisplayLine(line, selection, market)}`;
+}
+
+function mergeAlertMessages(
+  previousAlerts?: string[] | null,
+  nextAlerts?: string[] | null
+) {
+  const merged = [...(previousAlerts ?? []), ...(nextAlerts ?? [])]
+    .map((alert) => (typeof alert === 'string' ? alert.trim() : ''))
+    .filter(Boolean);
+
+  return merged.filter((alert, index) => merged.indexOf(alert) === index);
 }
 
 function getExecOptions(recommendation?: AnalyzeResponse['executionRecommendation']) {
@@ -1253,9 +1349,9 @@ const AnalysisModal = memo(function AnalysisModal({
                       {meta.label}
                     </span>
                   )}
-                  {analysis?.executionRecommendation?.tier && (
+                  {(game.analysis.confidence ?? meta?.confidence ?? analysis?.uiSummary?.finalPick?.confidence) && (
                     <span className="rounded-full border border-[rgba(8,26,53,0.1)] bg-[var(--surface-soft)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--ink-soft)]">
-                      Tier {analysis.executionRecommendation.tier}
+                      Tier {game.analysis.confidence ?? meta?.confidence ?? analysis?.uiSummary?.finalPick?.confidence}
                     </span>
                   )}
                 </div>
@@ -1650,7 +1746,7 @@ function getCardMeta(game: GameRow, analysis: AnalyzeResponse | null): CardMeta 
       selection: renderPickLabel(analysis.confirmedPick.selection, analysis.confirmedPick.line, analysis.confirmedPick.market),
       hasActivePick: true,
       market: analysis.confirmedPick.market,
-      confidence: analysis.uiSummary?.finalPick?.confidence ?? analysis.executionRecommendation?.tier ?? game.analysis.confidence,
+      confidence: game.analysis.confidence ?? analysis.uiSummary?.finalPick?.confidence ?? null,
       odds: analysis.confirmedPick.odds ?? null
     };
   }
@@ -1934,7 +2030,6 @@ export default function HomePage() {
   const [primingSlate, setPrimingSlate] = useState(false);
 
   const primedDatesRef = useRef<Set<string>>(new Set());
-  const gamesAbortRef = useRef<AbortController | null>(null);
   const analysisCacheRef = useRef<Record<string, AnalyzeResponse>>({});
   const analysisFetchTimesRef = useRef<Map<string, number>>(new Map());
   const analysisRequestsRef = useRef<Map<string, Promise<AnalyzeResponse | null>>>(new Map());
@@ -1995,91 +2090,92 @@ export default function HomePage() {
   const [solidDailyPick, setSolidDailyPick] = useState<SolidDailyPickState | null>(null);
   const [premiumDayClosed, setPremiumDayClosed] = useState<boolean | null>(null);
   const [statsPremiumPick, setStatsPremiumPick] = useState<StatsPremiumPick | null>(null);
-  const solidStorageDateKey = useMemo(() => getSolidStorageDateKey(0), []);
- 
 
   useEffect(() => {
-    setPremiumDayClosed(null);
-    fetch('/api/premium-lock')
-      .then((r) => r.json())
-      .then((data: { isClosed?: boolean }) => setPremiumDayClosed(data.isClosed ?? false))
-      .catch(() => setPremiumDayClosed(false));
-  }, [solidStorageDateKey]);
+    let cancelled = false;
+    let intervalId: number | null = null;
 
-useEffect(() => {
-  let cancelled = false;
-  let intervalId: number | null = null;
+    async function loadPremiumSummary() {
+      try {
+        const json = await runSharedRequest(
+          homePremiumRequestState,
+          'today',
+          async () => {
+            const res = await fetch('/api/premium-lock', {
+              cache: 'no-store',
+              headers: {
+                'x-origin-hint': 'home-premium'
+              }
+            });
+            const payload = (await res.json()) as HomePremiumResponse;
+            if (!res.ok || payload.ok === false) {
+              throw new Error(payload.error || 'No se pudo cargar premium');
+            }
+            return payload;
+          }
+        );
 
-  async function loadPremiumPick() {
-    try {
-      const res = await fetch('/api/stats', { cache: 'no-store' });
-      const json = (await res.json()) as HomeStatsResponse;
+        if (cancelled) return;
 
-      if (cancelled) return;
-
-      const premiumPick = json?.solidPick?.premiumPick ?? null;
-      if (premiumPick) {
-        setStatsPremiumPick(premiumPick);
-      }
-    } catch {
-      if (!cancelled) {
-        // mantener último premium pick válido
+        setPremiumDayClosed(json.isClosed ?? false);
+        setStatsPremiumPick(json.premiumPick ?? null);
+      } catch {
+        if (cancelled) return;
+        setPremiumDayClosed(false);
       }
     }
-  }
 
-  if (dayOffset === 0) {
-    void loadPremiumPick();
-    intervalId = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
-      void loadPremiumPick();
-    }, 180_000);
-  }
-
-  return () => {
-    cancelled = true;
-    if (intervalId !== null) {
-      window.clearInterval(intervalId);
+    if (dayOffset === 0) {
+      setPremiumDayClosed(null);
+      void loadPremiumSummary();
+      intervalId = window.setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        void loadPremiumSummary();
+      }, 600_000);
+    } else {
+      setPremiumDayClosed(null);
+      setStatsPremiumPick(null);
     }
-  };
-}, [dayOffset]);
 
-useEffect(() => {
-  if (premiumDayClosed === null) return;
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [dayOffset]);
 
-  if (premiumDayClosed) {
-    clearSolidPick(solidStorageDateKey);
-    setSolidDailyPick(null);
-    return;
-  }
+  useEffect(() => {
+    if (premiumDayClosed === null) return;
 
-  const sourceGames = todayGamesCache.length ? todayGamesCache : games;
+    if (premiumDayClosed || !statsPremiumPick) {
+      setSolidDailyPick(null);
+      return;
+    }
 
-  if (!statsPremiumPick) {
-    return;
-  }
+    const sourceGames = todayGamesCache.length ? todayGamesCache : games;
 
-  setSolidDailyPick({
-    dateKey: solidStorageDateKey,
-    gameId: statsPremiumPick.gameId,
-    gameLabel: resolveHomeMatchupLabel(
-      statsPremiumPick.gameId,
-      statsPremiumPick.gameLabel,
-      sourceGames
-    ),
-    market: statsPremiumPick.market as ExecutionLine['marketType'],
-    selection: statsPremiumPick.selection,
-    line: typeof statsPremiumPick.line === 'number' ? statsPremiumPick.line : null,
-    odds: statsPremiumPick.executionOdds ?? 0,
-    confidence: statsPremiumPick.confidence,
-    score: statsPremiumPick.score,
-    edge: statsPremiumPick.edge ?? null,
-    ev: statsPremiumPick.ev ?? null,
-    note: statsPremiumPick.note ?? null,
-    lockedAt: new Date().toISOString(),
-    game: sourceGames.find((game) => String(game.gameId) === String(statsPremiumPick.gameId)) ?? null
-  });
-}, [games, premiumDayClosed, solidStorageDateKey, statsPremiumPick, todayGamesCache]);
+    setSolidDailyPick({
+      dateKey: getDateKey(0),
+      gameId: statsPremiumPick.gameId,
+      gameLabel: resolveHomeMatchupLabel(
+        statsPremiumPick.gameId,
+        statsPremiumPick.gameLabel,
+        sourceGames
+      ),
+      market: statsPremiumPick.market as ExecutionLine['marketType'],
+      selection: statsPremiumPick.selection,
+      line: typeof statsPremiumPick.line === 'number' ? statsPremiumPick.line : null,
+      odds: statsPremiumPick.executionOdds ?? 0,
+      confidence: statsPremiumPick.confidence,
+      score: statsPremiumPick.score,
+      edge: statsPremiumPick.edge ?? null,
+      ev: statsPremiumPick.ev ?? null,
+      note: statsPremiumPick.note ?? null,
+      lockedAt: new Date().toISOString(),
+      game: sourceGames.find((game) => String(game.gameId) === String(statsPremiumPick.gameId)) ?? null
+    });
+  }, [games, premiumDayClosed, statsPremiumPick, todayGamesCache]);
 
   const applyExecutionSlotFromAnalysis = useCallback((json: AnalyzeResponse | null) => {
     setSelectedExecutionSlot(getExecOptions(json?.executionRecommendation)[0]?.slot ?? 'recommended');
@@ -2090,20 +2186,36 @@ useEffect(() => {
     return typeof fetchedAt === 'number' && Date.now() - fetchedAt < ANALYSIS_CACHE_MAX_AGE_MS;
   }, []);
 
-  const loadGames = useCallback(async (offset = dayOffset) => {
-    gamesAbortRef.current?.abort();
-    const controller = new AbortController();
-    gamesAbortRef.current = controller;
+  const loadGames = useCallback(async (
+    offset = dayOffset,
+    options?: { bypassRecentCache?: boolean }
+  ) => {
+    const dateKey = getDateKey(offset);
+    const requestState = getSharedRequestState(homeGamesRequestStates, dateKey);
 
     try {
       setGamesLoading(true);
       setGamesError(null);
-      const res = await fetch(`/api/games?date=${getDateKey(offset)}`, {
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      const json = (await res.json()) as GamesResponse;
-      if (!res.ok || !json.ok) throw new Error(json.error || 'No se pudieron cargar los juegos');
+      const json = await runSharedRequest(
+        requestState,
+        dateKey,
+        async () => {
+          const controller = new AbortController();
+          const res = await fetch(`/api/games?date=${dateKey}`, {
+            cache: 'no-store',
+            headers: {
+              'x-origin-hint': 'console-slate'
+            },
+            signal: controller.signal
+          });
+          const payload = (await res.json()) as GamesResponse;
+          if (!res.ok || !payload.ok) {
+            throw new Error(payload.error || 'No se pudieron cargar los juegos');
+          }
+          return payload;
+        },
+        options
+      );
       const nextGames = json.games ?? [];
       const nextConsoleGames = nextGames.filter(isPregameGame);
       startTransition(() => {
@@ -2117,65 +2229,83 @@ useEffect(() => {
         });
       });
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        return;
-      }
       setGamesError(error instanceof Error ? error.message : 'Error cargando juegos');
     } finally {
-      if (gamesAbortRef.current === controller) {
-        gamesAbortRef.current = null;
-        setGamesLoading(false);
-      }
+      setGamesLoading(false);
     }
   }, [dayOffset]);
 
   const mergeAnalysisIntoGame = useCallback((gameId: string, json: AnalyzeResponse) => {
+    const previousAnalysis = analysisCacheRef.current[gameId] ?? null;
+    const mergedAlerts = mergeAlertMessages(
+      previousAnalysis?.pickLock?.alerts,
+      json.pickLock?.alerts
+    );
+    const normalizedJson: AnalyzeResponse =
+      json.pickLock || mergedAlerts.length
+        ? {
+            ...json,
+            pickLock: {
+              snapshotId: json.pickLock?.snapshotId,
+              stage: json.pickLock?.stage ?? previousAnalysis?.pickLock?.stage ?? 'UNSAVED',
+              lastUpdatedAt:
+                json.pickLock?.lastUpdatedAt ??
+                previousAnalysis?.pickLock?.lastUpdatedAt ??
+                new Date().toISOString(),
+              alerts: mergedAlerts
+            }
+          }
+        : json;
+
     analysisCacheRef.current = {
       ...analysisCacheRef.current,
-      [gameId]: json
+      [gameId]: normalizedJson
     };
     analysisFetchTimesRef.current.set(gameId, Date.now());
 
     const isNoBet =
-      json.uiSummary?.finalPick?.market === 'PASS' ||
-      json.uiSummary?.execution?.status === 'NO_BET' ||
-      json.finalDecision?.status === 'NO_BET';
-    const recommendedLine = json.executionRecommendation?.recommendedLine ?? null;
-    const nextStatus = json.confirmedPick?.status ?? (isNoBet ? 'no_bet' : 'analyzed');
+      normalizedJson.uiSummary?.finalPick?.market === 'PASS' ||
+      normalizedJson.uiSummary?.execution?.status === 'NO_BET' ||
+      normalizedJson.finalDecision?.status === 'NO_BET';
+    const recommendedLine = normalizedJson.executionRecommendation?.recommendedLine ?? null;
+    const nextStatus = normalizedJson.confirmedPick?.status ?? (isNoBet ? 'no_bet' : 'analyzed');
     const nextSelection =
-      json.confirmedPick?.selection ??
+      normalizedJson.confirmedPick?.selection ??
       (isNoBet
         ? null
         : recommendedLine?.selection ??
-          json.uiSummary?.finalPick?.selection ??
+          normalizedJson.uiSummary?.finalPick?.selection ??
           null);
     const nextMarket =
-      json.confirmedPick?.market ??
+      normalizedJson.confirmedPick?.market ??
       (isNoBet
         ? null
         : recommendedLine?.marketType ??
-          json.uiSummary?.finalPick?.market ??
+          normalizedJson.uiSummary?.finalPick?.market ??
           null);
     const nextLine =
-      json.confirmedPick?.line ??
+      normalizedJson.confirmedPick?.line ??
       (isNoBet
         ? null
         : typeof recommendedLine?.line === 'number'
           ? recommendedLine.line
           : null);
     const nextOdds =
-      json.confirmedPick?.odds ??
+      normalizedJson.confirmedPick?.odds ??
       (isNoBet
         ? null
         : recommendedLine?.odds ??
-          json.uiSummary?.execution?.odds ??
+          normalizedJson.uiSummary?.execution?.odds ??
           null);
-    const nextProbability = isNoBet ? null : json.uiSummary?.finalPick?.probability ?? null;
-    const nextEdge = isNoBet ? null : json.uiSummary?.finalPick?.edge ?? null;
-    const nextEv = isNoBet ? null : json.uiSummary?.finalPick?.ev ?? null;
+    const nextConfidence = isNoBet
+      ? null
+      : normalizedJson.uiSummary?.finalPick?.confidence ?? null;
+    const nextProbability = isNoBet ? null : normalizedJson.uiSummary?.finalPick?.probability ?? null;
+    const nextEdge = isNoBet ? null : normalizedJson.uiSummary?.finalPick?.edge ?? null;
+    const nextEv = isNoBet ? null : normalizedJson.uiSummary?.finalPick?.ev ?? null;
 
     startTransition(() => {
-      setAnalysisByGame((current) => ({ ...current, [gameId]: json }));
+      setAnalysisByGame((current) => ({ ...current, [gameId]: normalizedJson }));
       setGames((current) =>
         current.map((game) =>
           game.gameId === gameId
@@ -2185,7 +2315,7 @@ useEffect(() => {
                   analyzed: true,
                   hasActivePick: Boolean(json.confirmedPick),
                   status: nextStatus,
-                  confidence: isNoBet ? null : json.uiSummary?.finalPick?.confidence ?? null,
+                  confidence: nextConfidence,
                   selection: nextSelection,
                   market: nextMarket,
                   line: nextLine,
@@ -2212,7 +2342,7 @@ useEffect(() => {
                   analyzed: true,
                   hasActivePick: Boolean(json.confirmedPick),
                   status: nextStatus,
-                  confidence: isNoBet ? null : json.uiSummary?.finalPick?.confidence ?? null,
+                  confidence: nextConfidence,
                   selection: nextSelection,
                   market: nextMarket,
                   line: nextLine,
@@ -2229,9 +2359,13 @@ useEffect(() => {
     });
   }, []);
 
-  const fetchAnalysis = useCallback(async (gameId: string, options?: { openPanel?: boolean; forceRefresh?: boolean }) => {
+  const fetchAnalysis = useCallback(async (
+    gameId: string,
+    options?: { openPanel?: boolean; forceRefresh?: boolean; originHint?: string }
+  ) => {
     const openPanel = options?.openPanel ?? false;
     const forceRefresh = options?.forceRefresh ?? false;
+    const originHint = options?.originHint ?? (openPanel ? 'analysis-open' : 'slate-prime');
     const cached = analysisCacheRef.current[gameId] ?? null;
     const cachedIsFresh = cached ? isAnalysisFresh(gameId) : false;
 
@@ -2267,7 +2401,12 @@ useEffect(() => {
       }
 
       const request = (async () => {
-        const res = await fetch(`/api/analyze?gameId=${encodeURIComponent(gameId)}`, { cache: 'no-store' });
+        const res = await fetch(`/api/analyze?gameId=${encodeURIComponent(gameId)}`, {
+          cache: 'no-store',
+          headers: {
+            'x-origin-hint': originHint
+          }
+        });
         const json = (await res.json()) as AnalyzeResponse;
         if (!res.ok || !json.ok) throw new Error(json.error || 'No se pudo analizar el juego');
         mergeAnalysisIntoGame(gameId, json);
@@ -2316,10 +2455,12 @@ useEffect(() => {
       const batchSize = 2;
       for (let index = 0; index < remainingIds.length; index += batchSize) {
         const batch = remainingIds.slice(index, index + batchSize);
-        await Promise.allSettled(batch.map((gameId) => fetchAnalysis(gameId)));
+        await Promise.allSettled(
+          batch.map((gameId) => fetchAnalysis(gameId, { originHint: 'slate-prime' }))
+        );
       }
 
-      await loadGames(offset);
+      await loadGames(offset, { bypassRecentCache: true });
     } finally {
       setPrimingSlate(false);
     }
@@ -2328,12 +2469,6 @@ useEffect(() => {
   useEffect(() => {
     void loadGames(dayOffset);
   }, [loadGames, dayOffset]);
-
-  useEffect(() => {
-    return () => {
-      gamesAbortRef.current?.abort();
-    };
-  }, []);
 
   useEffect(() => {
     if (!consoleGames.length) return;
@@ -2372,7 +2507,7 @@ useEffect(() => {
   useEffect(() => {
     if (dayOffset !== 0) return;
 
-    const refreshMs = liveCount > 0 ? 45000 : 90000;
+    const refreshMs = liveCount > 0 ? 60_000 : 180_000;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       void loadGames(dayOffset);
@@ -2393,7 +2528,7 @@ useEffect(() => {
 
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
-      void fetchAnalysis(selectedGameId, { forceRefresh: true });
+      void fetchAnalysis(selectedGameId, { forceRefresh: true, originHint: 'analysis-modal' });
     }, ANALYSIS_MODAL_REFRESH_MS);
 
     return () => window.clearInterval(interval);
@@ -2474,7 +2609,7 @@ useEffect(() => {
   }
 
   const handleSelectGame = useCallback((gameId: string) => {
-    void fetchAnalysis(gameId, { openPanel: true });
+      void fetchAnalysis(gameId, { openPanel: true, originHint: 'analysis-open' });
   }, [fetchAnalysis]);
   const handleCloseAnalysisModal = useCallback(() => {
     setAnalysisModalOpen(false);

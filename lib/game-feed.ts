@@ -14,6 +14,7 @@ export type TeamSummary = {
 export type GameAnalysisSummary = {
   analyzed: boolean;
   hasActivePick: boolean;
+  pickId?: string | null;
   status: string;
   confidence: string | null;
   selection: string | null;

@@ -3,6 +3,7 @@ import {
   getPregameSnapshotsForGames,
   listConfirmedPickAnalysisByGameIds
 } from '@/lib/db';
+import { getOriginHint, jsonResponseWithAudit } from '@/lib/api-egress-audit';
 import {
   fetchEspnMlbSummary,
   normalizeEspnLiveSituation
@@ -106,6 +107,7 @@ export async function GET(req: NextRequest) {
   try {
     const date = req.nextUrl.searchParams.get('date');
     const includeLiveDetails = req.nextUrl.searchParams.get('includeLiveDetails') === '1';
+    const originHint = getOriginHint(req.headers);
     const url = date
       ? `${ESPN_MLB_SCOREBOARD}?dates=${encodeURIComponent(date)}`
       : ESPN_MLB_SCOREBOARD;
@@ -134,48 +136,56 @@ export async function GET(req: NextRequest) {
       getPregameSnapshotsForGames(gameIds)
     ]);
 
-    const picks = picksRes.status === 'fulfilled' ? picksRes.value : [];
     const snapshotsByGameId =
       snapshotsRes.status === 'fulfilled' ? snapshotsRes.value : new Map();
+    const picks = picksRes.status === 'fulfilled' ? picksRes.value : [];
     const picksByGameId = new Map(
       picks.map((pick) => [
-        pick.game_id,
-        {
-          analyzed: true,
-          hasActivePick: true,
-          status: pick.status,
-          confidence: pick.confidence,
-          selection: pick.execution_selection || pick.selection,
-          market: pick.execution_market || pick.market,
-          line:
-            typeof pick.execution_line === 'number'
-              ? pick.execution_line
-              : typeof pick.line === 'number'
-                ? pick.line
-                : null,
-          odds:
-            typeof pick.execution_odds === 'number'
-              ? pick.execution_odds
-              : typeof pick.odds === 'number'
-                ? pick.odds
-                : null,
-          probability: safeNumber(pick.estimated_probability),
-          edge:
-            typeof pick.execution_odds === 'number' &&
-            Number.isFinite(pick.execution_odds) &&
-            typeof pick.estimated_probability === 'number' &&
-            Number.isFinite(pick.estimated_probability)
-              ? safeNumber(pick.estimated_probability - 1 / pick.execution_odds)
-              : safeNumber(pick.edge),
-          ev: safeNumber(pick.ev),
-          updatedAt: pick.updated_at
-        }
-      ])
+          pick.game_id,
+          {
+            pickId: pick.id,
+            analyzed: true,
+            hasActivePick: true,
+            status: pick.status,
+            confidence: pick.confidence,
+            selection: pick.execution_selection || pick.selection,
+            market: pick.execution_market || pick.market,
+            line:
+              typeof pick.execution_line === 'number'
+                ? pick.execution_line
+                : typeof pick.line === 'number'
+                  ? pick.line
+                  : null,
+            odds:
+              typeof pick.execution_odds === 'number'
+                ? pick.execution_odds
+                : typeof pick.odds === 'number'
+                  ? pick.odds
+                  : null,
+            probability: safeNumber(pick.estimated_probability),
+            edge: safeNumber(pick.edge),
+            ev: safeNumber(pick.ev),
+            updatedAt: pick.updated_at
+          }
+        ])
     );
 
     const liveSituationByGameId = new Map<string, LiveGameSituation | null>();
+    let requestedLiveSummaries = 0;
 
     if (includeLiveDetails) {
+      requestedLiveSummaries = events
+        .map((event) => {
+          const statusType = event.competitions?.[0]?.status?.type ?? event.status?.type;
+          const gameId = safeString(event.id);
+
+          if (!gameId || statusType?.state !== 'in' || statusType?.completed) {
+            return null;
+          }
+
+          return gameId;
+        })
+        .filter((gameId): gameId is string => Boolean(gameId)).length;
       const liveDetails = await Promise.allSettled(
         events
           .map((event) => {
@@ -279,6 +289,7 @@ export async function GET(req: NextRequest) {
             pickAnalysis ??
             (latestSnapshot
               ? {
+                  pickId: null,
                   analyzed: true,
                   hasActivePick: false,
                   status: isSnapshotNoBet ? 'no_bet' : 'analyzed',
@@ -312,6 +323,7 @@ export async function GET(req: NextRequest) {
                   updatedAt: latestSnapshot.updated_at
                 }
               : {
+                  pickId: null,
                   analyzed: false,
                   hasActivePick: false,
                   status: 'new',
@@ -343,16 +355,37 @@ export async function GET(req: NextRequest) {
       return left.name.localeCompare(right.name);
     });
 
-    return NextResponse.json({
-      ok: true,
-      games
-    });
+    return jsonResponseWithAudit(
+      '/api/games',
+      {
+        ok: true,
+        games
+      },
+      {
+        originHint,
+        date,
+        includeLiveDetails,
+        scoreboardEvents: events.length,
+        gameIds: gameIds.length,
+        confirmedPickRows: picks.length,
+        snapshotGames: snapshotsByGameId.size,
+        requestedLiveSummaries,
+        includedLiveSituations: liveSituationByGameId.size
+      }
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown error';
 
-    return NextResponse.json(
+    return jsonResponseWithAudit(
+      '/api/games',
       { ok: false, error: message },
+      {
+        originHint: getOriginHint(req.headers),
+        date: req.nextUrl.searchParams.get('date'),
+        includeLiveDetails: req.nextUrl.searchParams.get('includeLiveDetails') === '1',
+        error: message
+      },
       { status: 500 }
     );
   }

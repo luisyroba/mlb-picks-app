@@ -4,7 +4,50 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { startTransition, useCallback, useEffect, useState } from 'react';
 
-const NAV_LIVE_REFRESH_MS = 60_000;
+const NAV_LIVE_REFRESH_MS = 300_000;
+const NAV_INITIAL_REQUEST_DEDUPE_MS = 2_500;
+
+type LiveCountRequestState = {
+  promise: Promise<LiveCountResponse> | null;
+  value: LiveCountResponse | null;
+  valueAt: number;
+};
+
+const liveCountRequestState: LiveCountRequestState = {
+  promise: null,
+  value: null,
+  valueAt: 0
+};
+
+async function runLiveCountRequest(loader: () => Promise<LiveCountResponse>) {
+  const now = Date.now();
+
+  if (liveCountRequestState.promise) {
+    return liveCountRequestState.promise;
+  }
+
+  if (
+    liveCountRequestState.value !== null &&
+    now - liveCountRequestState.valueAt < NAV_INITIAL_REQUEST_DEDUPE_MS
+  ) {
+    return liveCountRequestState.value;
+  }
+
+  const request = loader()
+    .then((value) => {
+      liveCountRequestState.value = value;
+      liveCountRequestState.valueAt = Date.now();
+      return value;
+    })
+    .finally(() => {
+      if (liveCountRequestState.promise === request) {
+        liveCountRequestState.promise = null;
+      }
+    });
+
+  liveCountRequestState.promise = request;
+  return request;
+}
 
 type LiveCountResponse = {
   ok: boolean;
@@ -23,32 +66,34 @@ export function PrimaryNav({ className = 'mt-4' }: { className?: string }) {
   const pathname = usePathname();
   const [liveCount, setLiveCount] = useState(0);
 
-  const refreshLiveCount = useCallback(async (signal?: AbortSignal) => {
+  const refreshLiveCount = useCallback(async () => {
     try {
-      const response = await fetch('/api/live-count', {
-        cache: 'no-store',
-        signal
-      });
-      const payload = (await response.json()) as LiveCountResponse;
+      const payload = await runLiveCountRequest(async () => {
+        const response = await fetch('/api/live-count', {
+          cache: 'no-store',
+          headers: {
+            'x-origin-hint': 'primary-nav'
+          }
+        });
+        const json = (await response.json()) as LiveCountResponse;
 
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || 'No se pudo cargar el badge live.');
-      }
+        if (!response.ok || !json.ok) {
+          throw new Error(json.error || 'No se pudo cargar el badge live.');
+        }
+
+        return json;
+      });
 
       const nextCount = typeof payload.liveCount === 'number' ? payload.liveCount : 0;
       startTransition(() => {
         setLiveCount(nextCount);
       });
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        return;
-      }
     }
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void refreshLiveCount(controller.signal);
+    void refreshLiveCount();
 
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
@@ -56,7 +101,6 @@ export function PrimaryNav({ className = 'mt-4' }: { className?: string }) {
     }, NAV_LIVE_REFRESH_MS);
 
     return () => {
-      controller.abort();
       window.clearInterval(interval);
     };
   }, [refreshLiveCount]);

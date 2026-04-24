@@ -1,6 +1,7 @@
 // app/api/analyze/route.ts
 
 import { NextRequest, NextResponse } from 'next/server';
+import { getOriginHint, jsonResponseWithAudit } from '@/lib/api-egress-audit';
 import { getNormalizedEspnMlbGame } from '@/lib/espn';
 import { mapEspnToEngineGame } from '@/lib/map-espn-to-engine';
 import { enrichEngineGameWithMlbStats } from '@/lib/mlb-stats';
@@ -26,9 +27,11 @@ import {
   getMarketSnapshotWindow,
   getLatestPickForGame,
   getPregameSnapshotsForGame,
+  isConfirmedPickRecord,
   savePregameSnapshot,
   getOddsBoardCache,
   saveOddsBoardCache,
+  upsertPickRecord,
   type SnapshotStage,
   type PregameSnapshotRow
 } from '@/lib/db';
@@ -374,15 +377,38 @@ function findMatchingMarketEvent(
 ) {
   const home = normalizeEntityName(engineGame.homeTeam.core.teamName);
   const away = normalizeEntityName(engineGame.awayTeam.core.teamName);
+  const targetStartMs = new Date(engineGame.startTime ?? '').getTime();
 
-  return (
-    normalizedLines.find((event) => {
-      const eventHome = normalizeEntityName(event.homeTeam);
-      const eventAway = normalizeEntityName(event.awayTeam);
+  const candidates = normalizedLines.filter((event) => {
+    const eventHome = normalizeEntityName(event.homeTeam);
+    const eventAway = normalizeEntityName(event.awayTeam);
 
-      return eventHome === home && eventAway === away;
-    }) ?? null
-  );
+    return eventHome === home && eventAway === away;
+  });
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  if (candidates.length === 1 || !Number.isFinite(targetStartMs)) {
+    return candidates[0] ?? null;
+  }
+
+  const ranked = candidates
+    .map((event) => {
+      const eventStartMs = new Date(event.startsAt ?? '').getTime();
+      const distanceMs = Number.isFinite(eventStartMs)
+        ? Math.abs(eventStartMs - targetStartMs)
+        : Number.POSITIVE_INFINITY;
+
+      return {
+        event,
+        distanceMs
+      };
+    })
+    .sort((left, right) => left.distanceMs - right.distanceMs);
+
+  return ranked[0]?.event ?? candidates[0] ?? null;
 }
 
 function percentMove(current: number, opening: number): number {
@@ -717,6 +743,15 @@ function buildAnalyzePayload(
   matchingMarketEvent: ReturnType<typeof findMatchingMarketEvent>,
   executionRecommendation: ReturnType<typeof chooseBestExecution> | null
 ) {
+  const normalizedExecutionRecommendation = executionRecommendation
+    ? {
+        ...executionRecommendation,
+        tier:
+          executionRecommendation.recommendedEvaluation?.confidence ??
+          executionRecommendation.tier
+      }
+    : null;
+
   return {
     ok: true,
     espnGame,
@@ -728,7 +763,7 @@ function buildAnalyzePayload(
     finalDecision,
     finalPick,
     matchingMarketEvent,
-    executionRecommendation,
+    executionRecommendation: normalizedExecutionRecommendation,
 
     uiSummary: {
       pregameScore: roundScore(layerA.pregameScore),
@@ -803,6 +838,137 @@ function safeNumber(value: unknown): number | null {
   return null;
 }
 
+function sameNumericValue(left?: number | null, right?: number | null): boolean {
+  if (left === undefined || left === null) {
+    return right === undefined || right === null;
+  }
+
+  if (right === undefined || right === null) {
+    return false;
+  }
+
+  return Math.abs(left - right) < 0.001;
+}
+
+function formatAlertLineValue(
+  market: string,
+  selection: string,
+  line?: number | null
+): string {
+  if (line === undefined || line === null) return '';
+
+  const normalizedSelection = selection.toLowerCase();
+  const isTotalLike =
+    market === 'TOTAL' ||
+    normalizedSelection.startsWith('over') ||
+    normalizedSelection.startsWith('under');
+
+  return isTotalLike
+    ? line.toFixed(1)
+    : `${line > 0 ? '+' : ''}${line.toFixed(1)}`;
+}
+
+function describeExecutionDescriptor(input: {
+  market: string;
+  selection: string;
+  line?: number | null;
+}): string {
+  const suffix = formatAlertLineValue(input.market, input.selection, input.line);
+  const pickLabel = suffix ? `${input.selection} ${suffix}` : input.selection;
+  return input.market ? `${input.market} ${pickLabel}` : pickLabel;
+}
+
+function getExecutionDescriptorFromPick(
+  pick: Awaited<ReturnType<typeof getLatestPickForGame>>
+) {
+  if (!pick || !isConfirmedPickRecord(pick)) return null;
+
+  return {
+    market: safeString(pick.execution_market) || safeString(pick.market),
+    selection: safeString(pick.execution_selection) || safeString(pick.selection),
+    line:
+      typeof pick.execution_line === 'number'
+        ? pick.execution_line
+        : pick.line
+  };
+}
+
+function getExecutionDescriptorFromRecommendation(
+  recommendation: ReturnType<typeof chooseBestExecution> | null
+) {
+  const line = recommendation?.recommendedLine;
+  if (!line) return null;
+
+  return {
+    market: line.marketType,
+    selection: line.selection,
+    line: typeof line.line === 'number' ? line.line : null
+  };
+}
+
+function sameExecutionDescriptor(
+  left: ReturnType<typeof getExecutionDescriptorFromPick>,
+  right: ReturnType<typeof getExecutionDescriptorFromRecommendation>
+): boolean {
+  if (!left || !right) return false;
+
+  return (
+    left.market.toUpperCase() === right.market.toUpperCase() &&
+    normalizeEntityName(left.selection) === normalizeEntityName(right.selection) &&
+    sameNumericValue(left.line, right.line)
+  );
+}
+
+function resolvePendingPickResetReason(
+  pick: Awaited<ReturnType<typeof getLatestPickForGame>>,
+  currentDecision: { status?: string | null } | null,
+  recommendation: ReturnType<typeof chooseBestExecution> | null
+): string | null {
+  if (!pick || !isConfirmedPickRecord(pick)) return null;
+  if (safeString(pick.status).toLowerCase() !== 'pending') return null;
+
+  if (
+    safeString(currentDecision?.status) === 'NO_BET' ||
+    !recommendation?.recommendedLine
+  ) {
+    return 'El modelo paso a NO BET y se libero el pick ejecutado pendiente.';
+  }
+
+  const currentExecution = getExecutionDescriptorFromRecommendation(recommendation);
+  const confirmedExecution = getExecutionDescriptorFromPick(pick);
+
+  if (sameExecutionDescriptor(confirmedExecution, currentExecution)) {
+    return null;
+  }
+
+  if (!currentExecution || !confirmedExecution) {
+    return 'La recomendacion activa ya no coincide con el pick ejecutado pendiente.';
+  }
+
+  return `La recomendacion cambio de ${describeExecutionDescriptor(confirmedExecution)} a ${describeExecutionDescriptor(currentExecution)}; se libero el pick ejecutado pendiente.`;
+}
+
+function shouldSyncConfirmedPickCanonicalFields(
+  pick: Awaited<ReturnType<typeof getLatestPickForGame>>,
+  finalPick: ReturnType<typeof chooseBestPick>
+): boolean {
+  if (!pick || !isConfirmedPickRecord(pick) || finalPick.market === 'PASS') {
+    return false;
+  }
+
+  return (
+    safeString(pick.market).toUpperCase() !== finalPick.market.toUpperCase() ||
+    normalizeEntityName(safeString(pick.selection)) !== normalizeEntityName(finalPick.selection) ||
+    !sameNumericValue(pick.line, finalPick.line ?? null) ||
+    !sameNumericValue(pick.odds, finalPick.odds ?? null) ||
+    safeString(pick.confidence) !== finalPick.confidence ||
+    !sameNumericValue(pick.estimated_probability, finalPick.estimatedProbability ?? null) ||
+    !sameNumericValue(pick.implied_probability, finalPick.impliedProbability ?? null) ||
+    !sameNumericValue(pick.edge, finalPick.edge ?? null) ||
+    !sameNumericValue(pick.ev, finalPick.ev ?? null)
+  );
+}
+
 function buildResultSummaryFromPick(
   pick: Awaited<ReturnType<typeof getLatestPickForGame>>
 ) {
@@ -816,7 +982,7 @@ function buildResultSummaryFromPick(
 function buildConfirmedPickSummary(
   pick: Awaited<ReturnType<typeof getLatestPickForGame>>
 ) {
-  if (!pick) return null;
+  if (!pick || !isConfirmedPickRecord(pick)) return null;
 
   return {
     market: pick.execution_market || pick.market,
@@ -849,6 +1015,7 @@ function buildAlerts(
 
   const prevSelection = safeString(previousFinalPick?.selection);
   const currSelection = safeString(currentFinalPick?.selection);
+  const prevLine = safeNumber(previousFinalPick?.line);
   const currLine = safeNumber(currentFinalPick?.line);
   const previousDecision =
     previousPayload.finalDecision as Record<string, unknown> | undefined;
@@ -887,6 +1054,20 @@ function buildAlerts(
 
   if (prevSelection && currSelection && prevSelection !== currSelection) {
     alerts.push(`Cambio de pick: ${prevSelection} → ${currSelection}`);
+  }
+
+  if (
+    prevSelection &&
+    currSelection &&
+    prevSelection === currSelection &&
+    prevMarket &&
+    currMarket &&
+    prevMarket === currMarket &&
+    !sameNumericValue(prevLine, currLine)
+  ) {
+    alerts.push(
+      `Cambio de linea recomendada: ${prevSelection} ${formatAlertLineValue(prevMarket, prevSelection, prevLine)} -> ${currSelection} ${formatAlertLineValue(currMarket, currSelection, currLine)}`.trim()
+    );
   }
 
   const prevEngineGame =
@@ -977,6 +1158,40 @@ function buildAlerts(
   return alerts;
 }
 
+function normalizeStoredAlert(alert: Record<string, unknown> | string): string | null {
+  if (typeof alert === 'string') {
+    const trimmed = alert.trim();
+    return trimmed || null;
+  }
+
+  if (alert && typeof alert === 'object') {
+    const message = safeString((alert as Record<string, unknown>).message);
+    return message || null;
+  }
+
+  return null;
+}
+
+function mergeAlertHistory(
+  existingAlerts: Array<Record<string, unknown> | string> | null | undefined,
+  nextAlerts: string[]
+): string[] {
+  const merged = [
+    ...(existingAlerts ?? []).map(normalizeStoredAlert).filter((value): value is string => Boolean(value)),
+    ...nextAlerts
+  ];
+
+  return merged.filter((value, index) => merged.indexOf(value) === index);
+}
+
+function serializeSnapshotValue(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? 'null';
+  } catch {
+    return String(value);
+  }
+}
+
 async function saveCurrentPregameLock(
   gameId: string,
   espnGame: Awaited<ReturnType<typeof getNormalizedEspnMlbGame>>,
@@ -989,10 +1204,36 @@ async function saveCurrentPregameLock(
     (existing.open?.payload as Record<string, unknown> | null) ??
     null;
 
-  const alerts = buildAlerts(previousPayload, payload);
+  const alerts = mergeAlertHistory(
+    existing.mid?.alerts,
+    buildAlerts(previousPayload, payload)
+  );
 
   const stage: SnapshotStage =
     existing.open === null ? 'open' : 'mid';
+  const currentSnapshot =
+    stage === 'open'
+      ? existing.open
+      : existing.mid ?? existing.open;
+
+  if (
+    currentSnapshot &&
+    serializeSnapshotValue(currentSnapshot.payload) === serializeSnapshotValue(payload) &&
+    serializeSnapshotValue(currentSnapshot.alerts ?? []) === serializeSnapshotValue(alerts)
+  ) {
+    return {
+      snapshot: currentSnapshot,
+      alerts: (currentSnapshot.alerts ?? [])
+        .map(normalizeStoredAlert)
+        .filter((value): value is string => Boolean(value)),
+      stage:
+        currentSnapshot.snapshot_stage === 'open' ||
+        currentSnapshot.snapshot_stage === 'mid' ||
+        currentSnapshot.snapshot_stage === 'final'
+          ? currentSnapshot.snapshot_stage
+          : stage
+    };
+  }
 
   const snapshot = await savePregameSnapshot({
     gameId,
@@ -1040,10 +1281,17 @@ async function getOrCreateFinalLockedSnapshot(
 export async function GET(req: NextRequest) {
   try {
     const gameId = req.nextUrl.searchParams.get('gameId');
+    const originHint = getOriginHint(req.headers);
 
     if (!gameId) {
-      return NextResponse.json(
+      return jsonResponseWithAudit(
+        '/api/analyze',
         { ok: false, error: 'Missing gameId' },
+        {
+          originHint,
+          gameId: null,
+          error: 'Missing gameId'
+        },
         { status: 400 }
       );
     }
@@ -1057,10 +1305,17 @@ export async function GET(req: NextRequest) {
       );
 
       if (!finalSnapshot) {
-        return NextResponse.json(
+        return jsonResponseWithAudit(
+          '/api/analyze',
           {
             ok: false,
             error: 'El juego ya empezó y no existe snapshot pregame previo para congelar'
+          },
+          {
+            originHint,
+            gameId,
+            mode: 'frozen',
+            finalSnapshotFound: false
           },
           { status: 409 }
         );
@@ -1077,23 +1332,33 @@ export async function GET(req: NextRequest) {
           ? await autoSettlePick(latestPick)
           : latestPick;
 
-      return NextResponse.json({
-        ...frozenPayload,
-        ok: true,
-        frozenPregame: true,
-        statsFetchWarning: null,
-        oddsFetchWarning: null,
-        oddsCacheUpdatedAt: null,
-        oddsRefreshUsed: false,
-        confirmedPick: buildConfirmedPickSummary(settledPick ?? latestPick),
-        resultSummary: buildResultSummaryFromPick(settledPick ?? latestPick),
-        pickLock: {
-          snapshotId: finalSnapshot.id,
-          stage: 'FINAL',
-          lastUpdatedAt: finalSnapshot.updated_at,
-          alerts: finalSnapshot.alerts ?? []
+      return jsonResponseWithAudit(
+        '/api/analyze',
+        {
+          ...frozenPayload,
+          ok: true,
+          frozenPregame: true,
+          statsFetchWarning: null,
+          oddsFetchWarning: null,
+          oddsCacheUpdatedAt: null,
+          oddsRefreshUsed: false,
+          confirmedPick: buildConfirmedPickSummary(settledPick ?? latestPick),
+          resultSummary: buildResultSummaryFromPick(settledPick ?? latestPick),
+          pickLock: {
+            snapshotId: finalSnapshot.id,
+            stage: 'FINAL',
+            lastUpdatedAt: finalSnapshot.updated_at,
+            alerts: finalSnapshot.alerts ?? []
+          }
+        },
+        {
+          originHint,
+          gameId,
+          mode: 'frozen',
+          finalSnapshotFound: true,
+          alertCount: finalSnapshot.alerts?.length ?? 0
         }
-      });
+      );
     }
 
     let engineGame = mapEspnToEngineGame(espnGame);
@@ -1318,28 +1583,159 @@ export async function GET(req: NextRequest) {
       statsFetchWarning = statsFetchWarning ?? message;
     }
 
-    return NextResponse.json({
-      ...payload,
-      frozenPregame: false,
-      statsFetchWarning,
-      oddsFetchWarning,
-      oddsCacheUpdatedAt,
-      oddsRefreshUsed,
-      confirmedPick: buildConfirmedPickSummary(latestPick),
-      resultSummary: buildResultSummaryFromPick(latestPick),
-      pickLock: {
-        snapshotId: saved?.snapshot.id ?? null,
-        stage: saved?.stage.toUpperCase() ?? 'UNSAVED',
-        lastUpdatedAt: saved?.snapshot.updated_at ?? new Date().toISOString(),
-        alerts: saved?.alerts ?? []
+    let pendingPickResetAlert: string | null = null;
+    const pendingPickResetReason = resolvePendingPickResetReason(
+      latestPick,
+      finalDecision,
+      effectiveExecutionRecommendation
+    );
+
+    if (pendingPickResetReason && latestPick) {
+      try {
+        latestPick = await upsertPickRecord({
+          gameDay: latestPick.game_day,
+          gameId,
+          snapshotId: saved?.snapshot.id ?? latestPick.snapshot_id ?? null,
+          snapshotStage:
+            saved?.stage ??
+            (latestPick.snapshot_stage === 'open' ||
+            latestPick.snapshot_stage === 'mid' ||
+            latestPick.snapshot_stage === 'final'
+              ? latestPick.snapshot_stage
+              : null),
+          sport: 'MLB',
+          market: guardedFinalPick.market,
+          selection: guardedFinalPick.selection,
+          line: guardedFinalPick.line ?? null,
+          odds: guardedFinalPick.odds ?? null,
+          confidence: guardedFinalPick.confidence,
+          estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+          impliedProbability: guardedFinalPick.impliedProbability ?? null,
+          edge: guardedFinalPick.edge ?? null,
+          ev: guardedFinalPick.ev ?? null,
+          reason: pendingPickResetReason,
+          altMarket1: guardedFinalPick.altMarket1 ?? null,
+          altMarket2: guardedFinalPick.altMarket2 ?? null,
+          executionMarket: null,
+          executionSelection: null,
+          executionLine: null,
+          executionOdds: null,
+          executionSide: null,
+          executionReason: null,
+          status: 'pending',
+          result: null,
+          profitUnits: null
+        });
+        pendingPickResetAlert = pendingPickResetReason;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Unknown Supabase pending pick reset error';
+
+        statsFetchWarning = statsFetchWarning ?? message;
       }
-    });
+    }
+
+    if (
+      !pendingPickResetReason &&
+      latestPick &&
+      shouldSyncConfirmedPickCanonicalFields(latestPick, guardedFinalPick)
+    ) {
+      try {
+        latestPick = await upsertPickRecord({
+          gameDay: latestPick.game_day,
+          gameId,
+          snapshotId: saved?.snapshot.id ?? latestPick.snapshot_id ?? null,
+          snapshotStage:
+            saved?.stage ??
+            (latestPick.snapshot_stage === 'open' ||
+            latestPick.snapshot_stage === 'mid' ||
+            latestPick.snapshot_stage === 'final'
+              ? latestPick.snapshot_stage
+              : null),
+          sport: 'MLB',
+          market: guardedFinalPick.market,
+          selection: guardedFinalPick.selection,
+          line: guardedFinalPick.line ?? null,
+          odds: guardedFinalPick.odds ?? null,
+          confidence: guardedFinalPick.confidence,
+          estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+          impliedProbability: guardedFinalPick.impliedProbability ?? null,
+          edge: guardedFinalPick.edge ?? null,
+          ev: guardedFinalPick.ev ?? null,
+          reason: guardedFinalPick.executionReason,
+          altMarket1: guardedFinalPick.altMarket1 ?? null,
+          altMarket2: guardedFinalPick.altMarket2 ?? null,
+          executionMarket: latestPick.execution_market,
+          executionSelection: latestPick.execution_selection,
+          executionLine: latestPick.execution_line,
+          executionOdds: latestPick.execution_odds,
+          executionSide: latestPick.execution_side,
+          executionReason: latestPick.execution_reason,
+          status:
+            latestPick.status === 'pending' ||
+            latestPick.status === 'won' ||
+            latestPick.status === 'lost' ||
+            latestPick.status === 'void'
+              ? latestPick.status
+              : undefined,
+          result: latestPick.result,
+          profitUnits: latestPick.profit_units
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Unknown Supabase pick sync error';
+
+        statsFetchWarning = statsFetchWarning ?? message;
+      }
+    }
+
+    const responseAlerts = [
+      ...(saved?.alerts ?? []),
+      ...(pendingPickResetAlert ? [pendingPickResetAlert] : [])
+    ];
+
+    return jsonResponseWithAudit(
+      '/api/analyze',
+      {
+        ...payload,
+        frozenPregame: false,
+        statsFetchWarning,
+        oddsFetchWarning,
+        oddsCacheUpdatedAt,
+        oddsRefreshUsed,
+        confirmedPick: buildConfirmedPickSummary(latestPick),
+        resultSummary: buildResultSummaryFromPick(latestPick),
+        pickLock: {
+          snapshotId: saved?.snapshot.id ?? null,
+          stage: saved?.stage.toUpperCase() ?? 'UNSAVED',
+          lastUpdatedAt: saved?.snapshot.updated_at ?? new Date().toISOString(),
+          alerts: responseAlerts
+        }
+      },
+      {
+        originHint,
+        gameId,
+        mode: 'pregame',
+        marketCandidates: marketCandidates.length,
+        hasMatchingMarketEvent: Boolean(matchingMarketEvent),
+        savedSnapshot: Boolean(saved?.snapshot?.id),
+        savedStage: saved?.stage ?? null,
+        latestPickStatus: latestPick?.status ?? null,
+        responseAlerts: responseAlerts.length
+      }
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown error';
 
-    return NextResponse.json(
+    return jsonResponseWithAudit(
+      '/api/analyze',
       { ok: false, error: message },
+      {
+        originHint: getOriginHint(req.headers),
+        gameId: req.nextUrl.searchParams.get('gameId'),
+        error: message
+      },
       { status: 500 }
     );
   }

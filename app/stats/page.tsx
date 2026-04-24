@@ -821,7 +821,12 @@ const loadStats = useCallback(async () => {
     setStorageLoading(true);
 
     // 1) Stats principal.
-    const res = await fetch('/api/stats', { cache: 'no-store' });
+    const res = await fetch('/api/stats', {
+      cache: 'no-store',
+      headers: {
+        'x-origin-hint': 'stats-page'
+      }
+    });
     const json = (await res.json()) as StatsResponse;
 
     if (!res.ok || !json.ok) {
@@ -831,7 +836,12 @@ const loadStats = useCallback(async () => {
     setStats(json);
 
     // 2) Storage separado.
-    void fetch('/api/stats/storage', { cache: 'no-store' })
+    void fetch('/api/stats/storage', {
+      cache: 'no-store',
+      headers: {
+        'x-origin-hint': 'stats-page'
+      }
+    })
       .then(async (storageRes) => {
         const storageJson = await storageRes.json();
         setStorageData(storageJson as DbUsage);

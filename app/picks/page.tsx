@@ -1,6 +1,8 @@
 'use client';
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, startTransition, useEffect, useMemo, useState, useCallback } from 'react';
+import { ManualSettlePopover } from '@/app/_components/manual-settle-popover';
+import { settlePickManually, type ManualSettleStatus } from '@/lib/manual-settle-client';
 import { LIVE_STATS_CUTOFF_DATE_KEY } from '@/lib/runtime-config';
 import { getSlateDayKey } from '@/lib/slate-day';
 
@@ -38,6 +40,11 @@ type GroupedDay = {
   profitUnits: number;
 };
 
+type LoadPicksOptions = {
+  signal?: AbortSignal;
+  silent?: boolean;
+};
+
 function getPickDateKey(pick: PickItem): string | null {
   return getSlateDayKey(pick.gameDay, pick.gameDate, pick.createdAt);
 }
@@ -63,17 +70,6 @@ function formatUnits(value?: number | null) {
   return typeof value === 'number' && Number.isFinite(value)
     ? `${value > 0 ? '+' : ''}${value.toFixed(2)}u`
     : '-';
-}
-
-function formatCompactDateLabel(value?: string | null) {
-  if (!value) return 'Sin fecha';
-  const date = new Date(`${value}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-
-  return date.toLocaleDateString('es-CL', {
-    weekday: 'long',
-    day: 'numeric'
-  });
 }
 
 function formatDateBadgeLabel(value?: string | null) {
@@ -158,16 +154,62 @@ function PicksProgressBar() {
   );
 }
 
-const PickCard = memo(function PickCard({ pick }: { pick: PickItem }) {
+const PickCard = memo(function PickCard({
+  pick,
+  popoverOpen,
+  settleLoading,
+  settleError,
+  onTogglePopover,
+  onClosePopover,
+  onSettle
+}: {
+  pick: PickItem;
+  popoverOpen: boolean;
+  settleLoading: boolean;
+  settleError: string | null;
+  onTogglePopover: (pickId: string) => void;
+  onClosePopover: () => void;
+  onSettle: (pickId: string, status: ManualSettleStatus) => void;
+}) {
   const settled = pick.status !== 'pending';
   const displayOdds = pick.executionOdds ?? pick.modelOdds;
   const displayMarket = pick.executionMarket || pick.market;
+  const canSettle = !settled;
+
+  const handleToggle = () => {
+    if (!canSettle) return;
+    onTogglePopover(pick.id);
+  };
 
   return (
     <article
-      className="glass-panel rounded-[0.95rem] px-3 py-2.5"
+      className={`glass-panel relative rounded-[0.95rem] px-3 py-2.5 transition ${
+        canSettle
+          ? 'cursor-pointer hover:-translate-y-[1px] hover:shadow-[0_16px_28px_rgba(9,28,57,0.1)]'
+          : ''
+      }`}
       style={{ contentVisibility: 'auto' }}
+      onClick={handleToggle}
+      onKeyDown={(event) => {
+        if (!canSettle) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleToggle();
+        }
+      }}
+      role={canSettle ? 'button' : undefined}
+      tabIndex={canSettle ? 0 : undefined}
+      aria-expanded={canSettle ? popoverOpen : undefined}
     >
+      <ManualSettlePopover
+        open={popoverOpen}
+        pending={canSettle}
+        loading={settleLoading}
+        error={settleError}
+        onClose={onClosePopover}
+        onSettle={(status) => onSettle(pick.id, status)}
+      />
+
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -231,30 +273,52 @@ export default function PicksPage() {
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<PicksMode>('live');
   const [selectedDate, setSelectedDate] = useState('');
+  const [openPickId, setOpenPickId] = useState<string | null>(null);
+  const [settlingPickId, setSettlingPickId] = useState<string | null>(null);
+  const [settleError, setSettleError] = useState<string | null>(null);
 
-  async function loadPicks() {
-    try {
+const loadPicks = useCallback(async (options?: LoadPicksOptions) => {
+  const signal = options?.signal;
+  const silent = options?.silent ?? false;
+
+  try {
+    if (!silent) {
       setLoading(true);
-      setError(null);
+    }
+    setError(null);
 
-      const res = await fetch('/api/picks', { cache: 'no-store' });
-      const json = (await res.json()) as PicksResponse;
+    const res = await fetch('/api/picks', {
+      cache: 'no-store',
+      headers: {
+        'x-origin-hint': 'picks-page'
+      },
+      signal
+    });
 
-      if (!res.ok || !json.ok) {
-        throw new Error(json.error || 'No se pudieron cargar los picks');
-      }
+    const json = (await res.json()) as PicksResponse;
 
-      setPicks(json.picks ?? []);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Error cargando picks');
-    } finally {
+    if (!res.ok || !json.ok) {
+      throw new Error(json.error || 'No se pudieron cargar los picks');
+    }
+
+    setPicks(json.picks ?? []);
+  } catch (loadError) {
+    if (loadError instanceof Error && loadError.name === 'AbortError') {
+      return;
+    }
+    setError(loadError instanceof Error ? loadError.message : 'Error cargando picks');
+  } finally {
+    if (!signal?.aborted && !silent) {
       setLoading(false);
     }
   }
+}, []);
 
-  useEffect(() => {
-    void loadPicks();
-  }, []);
+useEffect(() => {
+  const controller = new AbortController();
+  void loadPicks({ signal: controller.signal });
+  return () => controller.abort();
+}, [loadPicks]);
 
   const segmented = useMemo(() => {
     const live: PickItem[] = [];
@@ -322,6 +386,45 @@ export default function PicksPage() {
   useEffect(() => {
     setSelectedDate(resolveDefaultDateKey(dateOptions));
   }, [dateOptions, mode]);
+
+  const handleTogglePopover = useCallback((pickId: string) => {
+    setSettleError(null);
+    setOpenPickId((current) => (current === pickId ? null : pickId));
+  }, []);
+
+  const handleSettle = useCallback(async (pickId: string, status: ManualSettleStatus) => {
+    try {
+      setSettlingPickId(pickId);
+      setSettleError(null);
+
+      const payload = await settlePickManually(pickId, status, 'picks-manual-settle');
+
+      startTransition(() => {
+        setPicks((current) =>
+          current.map((pick) =>
+            pick.id === pickId
+              ? {
+                  ...pick,
+                  status: payload.pick.status,
+                  profitUnits: payload.pick.profitUnits
+                }
+              : pick
+          )
+        );
+      });
+
+      setOpenPickId(null);
+      void loadPicks({ silent: true });
+    } catch (caughtError) {
+      setSettleError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : 'No se pudo cerrar el pick manualmente.'
+      );
+    } finally {
+      setSettlingPickId(null);
+    }
+  }, [loadPicks]);
 
   return (
     <main className="px-3 pb-8 pt-4 lg:px-5">
@@ -419,7 +522,16 @@ export default function PicksPage() {
 
               <div className="grid gap-1.5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                 {visibleGroup.items.map((pick) => (
-                  <PickCard key={pick.id} pick={pick} />
+                  <PickCard
+                    key={pick.id}
+                    pick={pick}
+                    popoverOpen={openPickId === pick.id}
+                    settleLoading={settlingPickId === pick.id}
+                    settleError={openPickId === pick.id ? settleError : null}
+                    onTogglePopover={handleTogglePopover}
+                    onClosePopover={() => setOpenPickId(null)}
+                    onSettle={handleSettle}
+                  />
                 ))}
               </div>
             </section>

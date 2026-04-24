@@ -76,6 +76,7 @@ const PICK_COLUMNS = [
 ].join(',');
 
 const PICK_ANALYSIS_COLUMNS = [
+  'id',
   'game_id',
   'market',
   'selection',
@@ -306,6 +307,7 @@ export type PickRow = {
 
 export type PickAnalysisSummaryRow = Pick<
   PickRow,
+  | 'id'
   | 'game_id'
   | 'market'
   | 'selection'
@@ -888,7 +890,8 @@ export async function listConfirmedPicksForLedger(): Promise<PickLedgerRow[]> {
     .select(PICK_LEDGER_COLUMNS)
     .eq('sport', 'MLB')
     .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
-    .order('updated_at', { ascending: false });
+    .order('updated_at', { ascending: false })
+    .limit(60);
 
   if (error) {
     throw new Error(`Failed to fetch ledger picks: ${error.message}`);

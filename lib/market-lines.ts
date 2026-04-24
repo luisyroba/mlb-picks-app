@@ -16,6 +16,7 @@ export type EventMarketLines = {
   eventId: string;
   homeTeam: string;
   awayTeam: string;
+  startsAt?: string | null;
   lines: MarketLine[];
 };
 
@@ -49,6 +50,9 @@ type SgoOdd = {
 
 type SgoEvent = {
   eventID?: string;
+  status?: {
+    startsAt?: string;
+  };
   teams?: {
     home?: {
       names?: { long?: string; short?: string; medium?: string };
@@ -687,6 +691,7 @@ if (
       eventId: String(event.eventID ?? ''),
       homeTeam,
       awayTeam,
+      startsAt: event.status?.startsAt ?? null,
       lines: sanitizeTotalLadders(lines)
     };
   });

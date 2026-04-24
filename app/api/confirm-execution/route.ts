@@ -12,7 +12,6 @@ import {
   type ExecutionRecommendation
 } from '@/lib/choose-best-execution';
 import type { MarketLine } from '@/lib/market-lines';
-import { expectedValue, impliedProbability } from '@/lib/probability-model';
 
 function roundOdds(value?: number | null): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -323,28 +322,6 @@ export async function POST(req: NextRequest) {
             altMarket2: existingPick?.alt_market_2 ?? null
           };
 
-      const usedOdds =
-        typeof result.usedOdds === 'number' && Number.isFinite(result.usedOdds)
-          ? result.usedOdds
-          : undefined;
-      const executionImpliedProbability =
-        usedOdds !== undefined && usedOdds > 1
-          ? impliedProbability(usedOdds)
-          : pickContext.impliedProbability;
-      const executionEdge =
-        typeof pickContext.estimatedProbability === 'number' &&
-        Number.isFinite(pickContext.estimatedProbability) &&
-        typeof executionImpliedProbability === 'number' &&
-        Number.isFinite(executionImpliedProbability)
-          ? pickContext.estimatedProbability - executionImpliedProbability
-          : pickContext.edge;
-      const executionEv =
-        typeof pickContext.estimatedProbability === 'number' &&
-        Number.isFinite(pickContext.estimatedProbability) &&
-        usedOdds !== undefined
-          ? expectedValue(pickContext.estimatedProbability, usedOdds)
-          : pickContext.ev;
-
       await upsertPickRecord({
         gameId,
         gameDay: deriveGameDay(snapshot?.start_time, existingPick?.game_day),
@@ -364,9 +341,9 @@ export async function POST(req: NextRequest) {
 
         confidence: pickContext.confidence,
         estimatedProbability: pickContext.estimatedProbability,
-        impliedProbability: roundMetric(executionImpliedProbability),
-        edge: roundMetric(executionEdge),
-        ev: roundMetric(executionEv),
+        impliedProbability: roundMetric(pickContext.impliedProbability),
+        edge: roundMetric(pickContext.edge),
+        ev: roundMetric(pickContext.ev),
 
         reason: pickContext.reason,
         altMarket1: pickContext.altMarket1,

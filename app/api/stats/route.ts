@@ -1,4 +1,5 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { getOriginHint, jsonResponseWithAudit } from '@/lib/api-egress-audit';
 import {
   getLatestMarketSnapshotsByGameIds,
   getPregameSnapshotsByIds,
@@ -10,7 +11,6 @@ import {
   supabase
 } from '@/lib/db';
 import { resolveMatchupLabel } from '@/lib/matchup-label';
-import { expectedValue, impliedProbability } from '@/lib/probability-model';
 import {
   ODDS_REFRESH_COOLDOWN_MS,
   LIVE_STATS_CUTOFF_DATE_KEY,
@@ -342,48 +342,16 @@ function roundMetric(value?: number | null): number | null {
 
 
 function getEffectiveImpliedProbability(pick: Record<string, unknown>): number | null {
-  const executionOdds =
-    typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
-      ? pick.execution_odds
-      : null;
-
-  if (executionOdds && executionOdds > 1) {
-    return impliedProbability(executionOdds);
-  }
-
   return typeof pick.implied_probability === 'number' && Number.isFinite(pick.implied_probability)
     ? pick.implied_probability
     : null;
 }
 
 function getEffectiveEdge(pick: Record<string, unknown>): number | null {
-  const estimatedProbability =
-    typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
-      ? pick.estimated_probability
-      : null;
-  const executionImplied = getEffectiveImpliedProbability(pick);
-
-  if (estimatedProbability !== null && executionImplied !== null) {
-    return estimatedProbability - executionImplied;
-  }
-
   return typeof pick.edge === 'number' && Number.isFinite(pick.edge) ? pick.edge : null;
 }
 
 function getEffectiveEv(pick: Record<string, unknown>): number | null {
-  const estimatedProbability =
-    typeof pick.estimated_probability === 'number' && Number.isFinite(pick.estimated_probability)
-      ? pick.estimated_probability
-      : null;
-  const executionOdds =
-    typeof pick.execution_odds === 'number' && Number.isFinite(pick.execution_odds)
-      ? pick.execution_odds
-      : null;
-
-  if (estimatedProbability !== null && executionOdds && executionOdds > 1) {
-    return expectedValue(estimatedProbability, executionOdds);
-  }
-
   return typeof pick.ev === 'number' && Number.isFinite(pick.ev) ? pick.ev : null;
 }
 
@@ -1188,8 +1156,9 @@ async function buildOddsUsageSummary() {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+const originHint = getOriginHint(req.headers);
 const [confirmedPicks, summaryViewResult] = await Promise.all([
   listConfirmedPicks(),
   supabase
@@ -1445,6 +1414,7 @@ const pickRecords: StatsPickRecord[] = recentWithSnapshots.map(
   ({ pick, snapshotPayload, gameDate, snapshot }) =>
     ({
       ...(pick as Record<string, unknown>),
+      confidence: String(pick.confidence ?? 'PASS'),
       game_date_key: getSlateDayKey(pick.game_day ?? null, gameDate, pick.created_at),
       game_start_time:
         typeof snapshot?.start_time === 'string'
@@ -1604,7 +1574,7 @@ const rawTodayCandidates = pickRecords
           }),
         market: String(p.marketType ?? p.market ?? ''),
         selection: String(p.selection ?? ''),
-        confidence: String(p.confidence ?? ''),
+        confidence: String(lockedPickRecord?.confidence ?? p.confidence ?? ''),
         score: typeof p.score === 'number' ? p.score : 0,
         edge: typeof p.edge === 'number' ? p.edge : null,
         ev: typeof p.ev === 'number' ? p.ev : null,
@@ -1767,7 +1737,7 @@ const rawTodayCandidates = pickRecords
       liveViews.at(-1)?.key ??
       null;
 
-    return NextResponse.json({
+    return jsonResponseWithAudit('/api/stats', {
       ok: true,
 summary: {
   totalPicks: summaryDb?.total_picks ?? 0,
@@ -1840,13 +1810,29 @@ summary: {
           views: liveViews
         }
       }
+    }, {
+      originHint,
+      confirmedPickRows: confirmedPicks.length,
+      summaryViewRows: summaryDb ? 1 : 0,
+      snapshotRows: snapshotsById.size,
+      marketSnapshotRows: marketSnapshotsByGameId.size,
+      pickRecords: pickRecords.length,
+      recentItems: recent.length,
+      trendPoints: trend.length,
+      livePeriods: liveViews.length,
+      todayRanking: solidTodayRanking.length
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown error';
 
-    return NextResponse.json(
+    return jsonResponseWithAudit(
+      '/api/stats',
       { ok: false, error: message },
+      {
+        originHint: getOriginHint(req.headers),
+        error: message
+      },
       { status: 500 }
     );
   }
