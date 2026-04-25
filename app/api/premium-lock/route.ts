@@ -23,6 +23,8 @@ type PremiumPickPayload = {
   estimatedProbability: number | null;
   impliedProbability: number | null;
   executionOdds: number | null;
+  status?: string;
+  profitUnits?: number | null;
   lockedAt?: string;
   lockReason?: string;
 };
@@ -44,6 +46,7 @@ type PendingPickRow = {
   execution_line: number | null;
   execution_odds: number | null;
   status: string;
+  profit_units?: number | null;
   game_day: string | null;
   created_at: string;
   updated_at: string;
@@ -138,7 +141,54 @@ export async function GET(req: NextRequest) {
             dateKey,
             isLocked: false,
             isClosed: true,
-            premiumPick: null
+            premiumPick: {
+              gameId: String(payload.gameId ?? ''),
+              gameLabel: String(payload.gameLabel ?? ''),
+              market: String(payload.marketType ?? payload.market ?? ''),
+              selection: String(payload.selection ?? ''),
+              line:
+                typeof payload.line === 'number'
+                  ? payload.line
+                  : null,
+              confidence: String(payload.confidence ?? ''),
+              score:
+                typeof payload.score === 'number'
+                  ? payload.score
+                  : 0,
+              edge:
+                typeof payload.edge === 'number'
+                  ? roundMetric(payload.edge)
+                  : null,
+              ev:
+                typeof payload.ev === 'number'
+                  ? roundMetric(payload.ev)
+                  : null,
+              estimatedProbability:
+                typeof payload.probability === 'number'
+                  ? roundMetric(payload.probability)
+                  : null,
+              impliedProbability:
+                typeof payload.impliedProbability === 'number'
+                  ? roundMetric(payload.impliedProbability)
+                  : null,
+              executionOdds:
+                typeof payload.odds === 'number'
+                  ? payload.odds
+                  : null,
+              status: String(payload.status ?? 'pending'),
+              profitUnits:
+                typeof payload.profitUnits === 'number'
+                  ? roundMetric(payload.profitUnits)
+                  : null,
+              lockedAt:
+                typeof payload.lockedAt === 'string'
+                  ? payload.lockedAt
+                  : undefined,
+              lockReason:
+                typeof payload.lockReason === 'string'
+                  ? payload.lockReason
+                  : undefined
+            }
           },
           {
             originHint,
@@ -156,7 +206,10 @@ export async function GET(req: NextRequest) {
       if (lockedGameId) {
         const lockedStatus = await getPickStatusByGameId(lockedGameId).catch(() => null);
         if (lockedStatus && lockedStatus !== 'pending') {
-          await closePremiumDailyLock(dateKey, payload).catch(() => null);
+          await closePremiumDailyLock(dateKey, {
+            ...payload,
+            status: lockedStatus
+          }).catch(() => null);
           return jsonResponseWithAudit(
             '/api/premium-lock',
             {
@@ -164,7 +217,54 @@ export async function GET(req: NextRequest) {
               dateKey,
               isLocked: false,
               isClosed: true,
-              premiumPick: null
+              premiumPick: {
+                gameId: String(payload.gameId ?? ''),
+                gameLabel: String(payload.gameLabel ?? ''),
+                market: String(payload.marketType ?? payload.market ?? ''),
+                selection: String(payload.selection ?? ''),
+                line:
+                  typeof payload.line === 'number'
+                    ? payload.line
+                    : null,
+                confidence: String(payload.confidence ?? ''),
+                score:
+                  typeof payload.score === 'number'
+                    ? payload.score
+                    : 0,
+                edge:
+                  typeof payload.edge === 'number'
+                    ? roundMetric(payload.edge)
+                    : null,
+                ev:
+                  typeof payload.ev === 'number'
+                    ? roundMetric(payload.ev)
+                    : null,
+                estimatedProbability:
+                  typeof payload.probability === 'number'
+                    ? roundMetric(payload.probability)
+                    : null,
+                impliedProbability:
+                  typeof payload.impliedProbability === 'number'
+                    ? roundMetric(payload.impliedProbability)
+                    : null,
+                executionOdds:
+                  typeof payload.odds === 'number'
+                    ? payload.odds
+                    : null,
+                status: lockedStatus,
+                profitUnits:
+                  typeof payload.profitUnits === 'number'
+                    ? roundMetric(payload.profitUnits)
+                    : null,
+                lockedAt:
+                  typeof payload.lockedAt === 'string'
+                    ? payload.lockedAt
+                    : undefined,
+                lockReason:
+                  typeof payload.lockReason === 'string'
+                    ? payload.lockReason
+                    : undefined
+              }
             },
             {
               originHint,
@@ -199,17 +299,17 @@ export async function GET(req: NextRequest) {
         'execution_line',
         'execution_odds',
         'status',
+        'profit_units',
         'game_day',
         'created_at',
         'updated_at'
       ].join(','))
       .eq('sport', 'MLB')
-      .eq('status', 'pending')
       .eq('game_day', dateKey)
       .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null');
 
     if (error) {
-      throw new Error(`Failed to fetch pending premium candidates: ${error.message}`);
+      throw new Error(`Failed to fetch premium candidates: ${error.message}`);
     }
 
     const pendingPicks = Array.isArray(data) ? (data as unknown as PendingPickRow[]) : [];
@@ -283,6 +383,11 @@ export async function GET(req: NextRequest) {
             : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
               ? pick.odds
               : null,
+        status: String(pick.status ?? 'pending'),
+        profitUnits:
+          typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+            ? roundMetric(pick.profit_units)
+            : null,
         createdAt: pick.created_at
       };
     });
@@ -338,6 +443,11 @@ export async function GET(req: NextRequest) {
             typeof lockData.odds === 'number'
               ? lockData.odds
               : lockedPick?.executionOdds ?? null,
+          status: String(lockData.status ?? lockedPick?.status ?? 'pending'),
+          profitUnits:
+            typeof lockData.profitUnits === 'number'
+              ? roundMetric(lockData.profitUnits)
+              : lockedPick?.profitUnits ?? null,
           lockedAt:
             typeof lockData.lockedAt === 'string'
               ? lockData.lockedAt
@@ -360,7 +470,9 @@ export async function GET(req: NextRequest) {
             ev: liveTop.ev,
             estimatedProbability: liveTop.estimatedProbability,
             impliedProbability: liveTop.impliedProbability,
-            executionOdds: liveTop.executionOdds
+            executionOdds: liveTop.executionOdds,
+            status: liveTop.status,
+            profitUnits: liveTop.profitUnits
           }
         : null;
 

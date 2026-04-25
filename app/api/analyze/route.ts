@@ -53,8 +53,54 @@ function roundScore(value?: number | null): number | null {
 }
 
 const ODDS_BOARD_KEY = 'mlb_main';
+const ODDS_BOARD_WINDOW_HOURS = 18;
+const ODDS_CACHE_SAVE_TIMEOUT_MS = 1500;
 
 type NormalizeMarketLinesInput = Parameters<typeof normalizeMarketLines>[0];
+type NormalizedMarketLines = ReturnType<typeof normalizeMarketLines>;
+type OddsBoardWindow = ReturnType<typeof getOddsBoardWindow>;
+
+type OddsBoardWindowStats = {
+  eventsInsideWindow: number;
+  eventsOutsideWindow: number;
+  cacheValidForWindow: boolean;
+};
+
+type OddsBoardDiagnostics = OddsBoardWindowStats & {
+  cacheHit: boolean;
+  refreshAttempted: boolean;
+  refreshFailedReason: string | null;
+  calledExternalOddsApi: boolean;
+  eventCountFetched: number;
+  estimatedObjectsConsumed: number;
+  reason: string;
+};
+
+type OddsBoardCacheCandidate = {
+  source: 'db' | 'runtime';
+  payload: NormalizeMarketLinesInput;
+  normalizedLines: NormalizedMarketLines;
+  updatedAt: string;
+  ageMs: number | null;
+  windowStats: OddsBoardWindowStats;
+};
+
+type OddsBoardRuntimeCacheEntry = {
+  payload: NormalizeMarketLinesInput;
+  updatedAt: string;
+};
+
+const runtimeOddsBoardCache = new Map<string, OddsBoardRuntimeCacheEntry>();
+const inflightOddsBoardRefreshes = new Map<
+  string,
+  Promise<{
+    normalizedLines: NormalizedMarketLines;
+    oddsCacheUpdatedAt: string | null;
+    oddsRefreshUsed: boolean;
+    oddsFetchWarning: string | null;
+    diagnostics: OddsBoardDiagnostics;
+  }>
+>();
 
 function getAgeMs(updatedAt?: string | null): number | null {
   if (!updatedAt) return null;
@@ -87,6 +133,90 @@ function formatUsageMonthKey(date = new Date()): string {
     }, {});
 
   return `${parts.year}-${parts.month}`;
+}
+
+function getOddsBoardKey(startTime?: string | null): string {
+  if (!startTime) return ODDS_BOARD_KEY;
+
+  const startDate = new Date(startTime);
+  if (!Number.isFinite(startDate.getTime())) return ODDS_BOARD_KEY;
+
+  return `${ODDS_BOARD_KEY}:${formatUsageDateKey(startDate)}`;
+}
+
+function getOddsBoardWindow(startTime?: string | null): {
+  startsAfter?: string;
+  startsBefore?: string;
+} {
+  if (!startTime) return {};
+
+  const startMs = new Date(startTime).getTime();
+  if (!Number.isFinite(startMs)) return {};
+
+  const windowMs = ODDS_BOARD_WINDOW_HOURS * 60 * 60 * 1000;
+
+  return {
+    startsAfter: new Date(startMs - windowMs).toISOString(),
+    startsBefore: new Date(startMs + windowMs).toISOString()
+  };
+}
+
+function getMarketLinesWindowStats(
+  normalizedLines: NormalizedMarketLines,
+  window: OddsBoardWindow
+): OddsBoardWindowStats {
+  const startsAfterMs = new Date(window.startsAfter ?? '').getTime();
+  const startsBeforeMs = new Date(window.startsBefore ?? '').getTime();
+
+  if (!Number.isFinite(startsAfterMs) || !Number.isFinite(startsBeforeMs)) {
+    return {
+      eventsInsideWindow: normalizedLines.length,
+      eventsOutsideWindow: 0,
+      cacheValidForWindow: true
+    };
+  }
+
+  let eventsInsideWindow = 0;
+  let eventsOutsideWindow = 0;
+
+  for (const event of normalizedLines) {
+    const startsAtMs = new Date(event.startsAt ?? '').getTime();
+
+    if (
+      Number.isFinite(startsAtMs) &&
+      startsAtMs >= startsAfterMs &&
+      startsAtMs <= startsBeforeMs
+    ) {
+      eventsInsideWindow += 1;
+    } else {
+      eventsOutsideWindow += 1;
+    }
+  }
+
+  return {
+    eventsInsideWindow,
+    eventsOutsideWindow,
+    cacheValidForWindow:
+      eventsInsideWindow > 0 && eventsInsideWindow >= eventsOutsideWindow
+  };
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error(`${label} timeout after ${timeoutMs}ms`)),
+      timeoutMs
+    );
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 async function bumpOddsUsageCounter(boardKey: string, date = new Date()) {
@@ -124,65 +254,374 @@ async function recordOddsApiRefreshUsage(date = new Date()) {
   ]);
 }
 
-async function getNormalizedMarketLinesAuto(): Promise<{
-  normalizedLines: ReturnType<typeof normalizeMarketLines>;
+function getEstimatedObjectsConsumed(eventCountFetched: number): number {
+  return Math.max(0, eventCountFetched);
+}
+
+function toOddsBoardCacheCandidate(
+  source: OddsBoardCacheCandidate['source'],
+  payload: NormalizeMarketLinesInput | undefined,
+  updatedAt: string | null | undefined,
+  window: OddsBoardWindow
+): OddsBoardCacheCandidate | null {
+  if (!payload || !updatedAt) return null;
+
+  const normalizedLines = normalizeMarketLines(payload);
+
+  return {
+    source,
+    payload,
+    normalizedLines,
+    updatedAt,
+    ageMs: getAgeMs(updatedAt),
+    windowStats: getMarketLinesWindowStats(normalizedLines, window)
+  };
+}
+
+function pickNewestCandidate(
+  candidates: Array<OddsBoardCacheCandidate | null>
+): OddsBoardCacheCandidate | null {
+  return candidates
+    .filter((candidate): candidate is OddsBoardCacheCandidate => Boolean(candidate))
+    .sort(
+      (left, right) =>
+        new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    )[0] ?? null;
+}
+
+function getValidCandidate(
+  candidates: Array<OddsBoardCacheCandidate | null>
+): OddsBoardCacheCandidate | null {
+  return pickNewestCandidate(
+    candidates.filter((candidate) => candidate?.windowStats.cacheValidForWindow)
+  );
+}
+
+function getRuntimeOddsBoardCandidate(
+  boardKey: string,
+  window: OddsBoardWindow
+): OddsBoardCacheCandidate | null {
+  const runtimeCached = runtimeOddsBoardCache.get(boardKey);
+  return toOddsBoardCacheCandidate(
+    'runtime',
+    runtimeCached?.payload,
+    runtimeCached?.updatedAt,
+    window
+  );
+}
+
+function setRuntimeOddsBoardCache(
+  boardKey: string,
+  payload: NormalizeMarketLinesInput
+): string {
+  const updatedAt = new Date().toISOString();
+  runtimeOddsBoardCache.set(boardKey, {
+    payload,
+    updatedAt
+  });
+  return updatedAt;
+}
+
+function buildOddsDiagnostics(
+  candidate: OddsBoardCacheCandidate | null,
+  input: {
+    refreshAttempted: boolean;
+    refreshFailedReason: string | null;
+    calledExternalOddsApi: boolean;
+    eventCountFetched: number;
+    reason: string;
+  }
+): OddsBoardDiagnostics {
+  const eventCountFetched = Math.max(0, input.eventCountFetched);
+
+  return {
+    cacheHit: Boolean(candidate),
+    eventsInsideWindow: candidate?.windowStats.eventsInsideWindow ?? 0,
+    eventsOutsideWindow: candidate?.windowStats.eventsOutsideWindow ?? 0,
+    cacheValidForWindow: candidate?.windowStats.cacheValidForWindow ?? false,
+    refreshAttempted: input.refreshAttempted,
+    refreshFailedReason: input.refreshFailedReason,
+    calledExternalOddsApi: input.calledExternalOddsApi,
+    eventCountFetched,
+    estimatedObjectsConsumed:
+      input.calledExternalOddsApi
+        ? getEstimatedObjectsConsumed(eventCountFetched)
+        : 0,
+    reason: input.reason
+  };
+}
+
+function logOddsUsage(payload: {
+  gameId: string;
+  boardKey: string;
+  diagnostics: OddsBoardDiagnostics;
+}) {
+  console.warn('[odds-usage] route', {
+    route: '/api/analyze',
+    gameId: payload.gameId,
+    boardKey: payload.boardKey,
+    cacheHit: payload.diagnostics.cacheHit,
+    cacheValidForWindow: payload.diagnostics.cacheValidForWindow,
+    calledExternalOddsApi: payload.diagnostics.calledExternalOddsApi,
+    eventCountFetched: payload.diagnostics.eventCountFetched,
+    estimatedObjectsConsumed: payload.diagnostics.estimatedObjectsConsumed,
+    reason: payload.diagnostics.reason
+  });
+}
+
+async function getNormalizedMarketLinesForBoard(
+  boardKey: string,
+  window: OddsBoardWindow,
+  cached: Awaited<ReturnType<typeof getOddsBoardCache>> | null = null
+): Promise<{
+  normalizedLines: NormalizedMarketLines;
   oddsCacheUpdatedAt: string | null;
   oddsRefreshUsed: boolean;
   oddsFetchWarning: string | null;
+  diagnostics: OddsBoardDiagnostics;
 }> {
-  const cached = await getOddsBoardCache(ODDS_BOARD_KEY);
-  const ageMs = getAgeMs(cached?.updated_at ?? null);
+  const currentCached = cached ?? (await getOddsBoardCache(boardKey));
+  const boardCandidates = [
+    getRuntimeOddsBoardCandidate(boardKey, window),
+    toOddsBoardCacheCandidate(
+      'db',
+      currentCached?.payload as NormalizeMarketLinesInput | undefined,
+      currentCached?.updated_at ?? null,
+      window
+    )
+  ];
+  const validCurrentCandidate = getValidCandidate(boardCandidates);
 
-  if (
-    cached?.payload &&
-    ageMs !== null &&
-    ageMs < ODDS_REFRESH_COOLDOWN_MS
-  ) {
-const cachedPayload =
-  cached.payload as unknown as NormalizeMarketLinesInput;
-
+  if (validCurrentCandidate) {
     return {
-      normalizedLines: normalizeMarketLines(cachedPayload),
-      oddsCacheUpdatedAt: cached.updated_at,
+      normalizedLines: validCurrentCandidate.normalizedLines,
+      oddsCacheUpdatedAt: validCurrentCandidate.updatedAt,
       oddsRefreshUsed: false,
-      oddsFetchWarning: null
+      oddsFetchWarning: null,
+      diagnostics: buildOddsDiagnostics(validCurrentCandidate, {
+        refreshAttempted: false,
+        refreshFailedReason: null,
+        calledExternalOddsApi: false,
+        eventCountFetched: 0,
+        reason: `cache-valid-${validCurrentCandidate.source}`
+      })
     };
   }
 
-  try {
-    const fresh = await fetchMlbMarketLines();
+  if (boardKey !== ODDS_BOARD_KEY) {
+    const globalCached = await getOddsBoardCache(ODDS_BOARD_KEY).catch(() => null);
+    const globalCandidates = [
+      getRuntimeOddsBoardCandidate(ODDS_BOARD_KEY, window),
+      toOddsBoardCacheCandidate(
+        'db',
+        globalCached?.payload as NormalizeMarketLinesInput | undefined,
+        globalCached?.updated_at ?? null,
+        window
+      )
+    ];
+    const validGlobalCandidate = getValidCandidate(globalCandidates);
 
-    const saved = await saveOddsBoardCache({
-      boardKey: ODDS_BOARD_KEY,
-      sport: 'MLB',
-      payload: fresh as unknown as Record<string, unknown>,
-      source: 'sportsgameodds'
+    if (validGlobalCandidate) {
+      return {
+        normalizedLines: validGlobalCandidate.normalizedLines,
+        oddsCacheUpdatedAt: validGlobalCandidate.updatedAt,
+        oddsRefreshUsed: false,
+        oddsFetchWarning: null,
+        diagnostics: buildOddsDiagnostics(validGlobalCandidate, {
+          refreshAttempted: false,
+          refreshFailedReason: null,
+          calledExternalOddsApi: false,
+          eventCountFetched: 0,
+          reason: `global-cache-valid-${validGlobalCandidate.source}`
+        })
+      };
+    }
+  }
+
+  const freshestCurrentCandidate = pickNewestCandidate(boardCandidates);
+  if (
+    freshestCurrentCandidate &&
+    freshestCurrentCandidate?.ageMs !== null &&
+    freshestCurrentCandidate.ageMs < ODDS_REFRESH_COOLDOWN_MS
+  ) {
+    const reason = 'cooldown-active-no-valid-cache';
+    return {
+      normalizedLines: [],
+      oddsCacheUpdatedAt: freshestCurrentCandidate.updatedAt,
+      oddsRefreshUsed: false,
+      oddsFetchWarning: 'Cooldown active and no valid odds board cache available yet',
+      diagnostics: buildOddsDiagnostics(freshestCurrentCandidate, {
+        refreshAttempted: false,
+        refreshFailedReason: null,
+        calledExternalOddsApi: false,
+        eventCountFetched: 0,
+        reason
+      })
+    };
+  }
+
+  const sharedInflightRefresh = inflightOddsBoardRefreshes.has(boardKey);
+  let refreshPromise = inflightOddsBoardRefreshes.get(boardKey);
+
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      let eventCountFetched = 0;
+
+      try {
+        const fresh = await fetchMlbMarketLines(window);
+        eventCountFetched = fresh.data?.length ?? 0;
+        const runtimeUpdatedAt = setRuntimeOddsBoardCache(boardKey, fresh);
+        const freshLines = normalizeMarketLines(fresh);
+        const freshWindowStats = getMarketLinesWindowStats(freshLines, window);
+
+        if (!freshWindowStats.cacheValidForWindow) {
+          const invalidCandidate = toOddsBoardCacheCandidate(
+            'runtime',
+            fresh,
+            runtimeUpdatedAt,
+            window
+          );
+
+          return {
+            normalizedLines: [],
+            oddsCacheUpdatedAt: runtimeUpdatedAt,
+            oddsRefreshUsed: true,
+            oddsFetchWarning:
+              `Odds board fuera de ventana: ${freshWindowStats.eventsInsideWindow} dentro, ${freshWindowStats.eventsOutsideWindow} fuera`,
+            diagnostics: buildOddsDiagnostics(invalidCandidate, {
+              refreshAttempted: true,
+              refreshFailedReason:
+                `Odds board fuera de ventana: ${freshWindowStats.eventsInsideWindow} dentro, ${freshWindowStats.eventsOutsideWindow} fuera`,
+              calledExternalOddsApi: true,
+              eventCountFetched,
+              reason: 'external-refresh-invalid-window'
+            })
+          };
+        }
+
+        let savedUpdatedAt = runtimeUpdatedAt;
+        let saveWarning: string | null = null;
+
+        try {
+          const saved = await withTimeout(
+            saveOddsBoardCache({
+              boardKey,
+              sport: 'MLB',
+              payload: fresh as unknown as Record<string, unknown>,
+              source: 'sportsgameodds'
+            }),
+            ODDS_CACHE_SAVE_TIMEOUT_MS,
+            'save odds board cache'
+          );
+          savedUpdatedAt = saved.updated_at;
+          runtimeOddsBoardCache.set(boardKey, {
+            payload: fresh,
+            updatedAt: saved.updated_at
+          });
+          void recordOddsApiRefreshUsage().catch((error) => {
+            console.warn('[odds-match] odds usage counter save failed', {
+              boardKey,
+              refreshFailedReason:
+                error instanceof Error ? error.message : 'Unknown odds usage save error'
+            });
+          });
+        } catch (error) {
+          saveWarning =
+            error instanceof Error ? error.message : 'Unknown odds cache save error';
+          console.warn('[odds-match] odds board cache save failed; using fresh board in-memory', {
+            boardKey,
+            cacheHit: false,
+            cacheValidForWindow: freshWindowStats.cacheValidForWindow,
+            eventsInsideWindow: freshWindowStats.eventsInsideWindow,
+            eventsOutsideWindow: freshWindowStats.eventsOutsideWindow,
+            refreshAttempted: true,
+            refreshFailedReason: saveWarning
+          });
+        }
+
+        const refreshedCandidate = toOddsBoardCacheCandidate(
+          'runtime',
+          fresh,
+          savedUpdatedAt,
+          window
+        );
+
+        return {
+          normalizedLines: freshLines,
+          oddsCacheUpdatedAt: savedUpdatedAt,
+          oddsRefreshUsed: true,
+          oddsFetchWarning: saveWarning,
+          diagnostics: buildOddsDiagnostics(refreshedCandidate, {
+            refreshAttempted: true,
+            refreshFailedReason: saveWarning,
+            calledExternalOddsApi: true,
+            eventCountFetched,
+            reason: saveWarning
+              ? 'external-refresh-cache-save-failed-runtime-only'
+              : 'external-refresh'
+          })
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Unknown odds error';
+
+        return {
+          normalizedLines: [],
+          oddsCacheUpdatedAt: freshestCurrentCandidate?.updatedAt ?? null,
+          oddsRefreshUsed: false,
+          oddsFetchWarning: message,
+          diagnostics: buildOddsDiagnostics(freshestCurrentCandidate, {
+            refreshAttempted: true,
+            refreshFailedReason: message,
+            calledExternalOddsApi: true,
+            eventCountFetched,
+            reason: 'external-refresh-failed'
+          })
+        };
+      }
+    })().finally(() => {
+      inflightOddsBoardRefreshes.delete(boardKey);
     });
-    await recordOddsApiRefreshUsage();
+
+    inflightOddsBoardRefreshes.set(boardKey, refreshPromise);
+  }
+
+  try {
+    const refreshed = await refreshPromise;
+
+    if (sharedInflightRefresh) {
+      return {
+        ...refreshed,
+        diagnostics: {
+          ...refreshed.diagnostics,
+          calledExternalOddsApi: false,
+          estimatedObjectsConsumed: 0,
+          eventCountFetched: 0,
+          reason: 'inflight-refresh-shared'
+        }
+      };
+    }
 
     return {
-      normalizedLines: normalizeMarketLines(fresh),
-      oddsCacheUpdatedAt: saved.updated_at,
-      oddsRefreshUsed: true,
-      oddsFetchWarning: null
+      ...refreshed
     };
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown odds error';
 
-    if (cached?.payload) {
-const cachedPayload =
-  cached.payload as unknown as NormalizeMarketLinesInput;
-
-      return {
-        normalizedLines: normalizeMarketLines(cachedPayload),
-        oddsCacheUpdatedAt: cached.updated_at,
-        oddsRefreshUsed: false,
-        oddsFetchWarning: message
-      };
-    }
-
-    throw error;
+    return {
+      normalizedLines: [],
+      oddsCacheUpdatedAt: freshestCurrentCandidate?.updatedAt ?? null,
+      oddsRefreshUsed: false,
+      oddsFetchWarning: message,
+      diagnostics: buildOddsDiagnostics(freshestCurrentCandidate, {
+        refreshAttempted: true,
+        refreshFailedReason: message,
+        calledExternalOddsApi: false,
+        eventCountFetched: 0,
+        reason: 'unexpected-refresh-wrapper-error'
+      })
+    };
   }
 }
 
@@ -375,15 +814,28 @@ function findMatchingMarketEvent(
   normalizedLines: ReturnType<typeof normalizeMarketLines>,
   engineGame: ReturnType<typeof mapEspnToEngineGame>
 ) {
-  const home = normalizeEntityName(engineGame.homeTeam.core.teamName);
-  const away = normalizeEntityName(engineGame.awayTeam.core.teamName);
+  const homeNames = [
+    engineGame.homeTeam.core.teamName,
+    engineGame.homeTeam.core.abbreviation
+  ]
+    .map((value) => normalizeEntityName(value))
+    .filter(Boolean);
+  const awayNames = [
+    engineGame.awayTeam.core.teamName,
+    engineGame.awayTeam.core.abbreviation
+  ]
+    .map((value) => normalizeEntityName(value))
+    .filter(Boolean);
   const targetStartMs = new Date(engineGame.startTime ?? '').getTime();
 
   const candidates = normalizedLines.filter((event) => {
     const eventHome = normalizeEntityName(event.homeTeam);
     const eventAway = normalizeEntityName(event.awayTeam);
 
-    return eventHome === home && eventAway === away;
+    return (
+      teamNamesMatch(eventHome, homeNames) &&
+      teamNamesMatch(eventAway, awayNames)
+    );
   });
 
   if (!candidates.length) {
@@ -409,6 +861,120 @@ function findMatchingMarketEvent(
     .sort((left, right) => left.distanceMs - right.distanceMs);
 
   return ranked[0]?.event ?? candidates[0] ?? null;
+}
+
+function teamNamesMatch(
+  eventName: string,
+  targetNames: string[]
+): boolean {
+  return targetNames.some((targetName) => {
+    if (!targetName) return false;
+    if (eventName === targetName) return true;
+
+    const shorter = eventName.length < targetName.length ? eventName : targetName;
+    const longer = eventName.length < targetName.length ? targetName : eventName;
+
+    return shorter.length >= 4 && longer.includes(shorter);
+  });
+}
+
+function getTeamMatchScore(eventName: string, targetNames: string[]): number {
+  if (teamNamesMatch(eventName, targetNames)) return 1;
+
+  const eventTokens = new Set(eventName.split(' ').filter((token) => token.length >= 3));
+  const targetTokens = targetNames.flatMap((name) =>
+    name.split(' ').filter((token) => token.length >= 3)
+  );
+
+  if (!eventTokens.size || !targetTokens.length) return 0;
+
+  const overlap = targetTokens.filter((token) => eventTokens.has(token)).length;
+  return overlap / Math.max(eventTokens.size, targetTokens.length);
+}
+
+function getClosestMarketEventsForLog(
+  normalizedLines: ReturnType<typeof normalizeMarketLines>,
+  engineGame: ReturnType<typeof mapEspnToEngineGame>
+) {
+  const homeNames = [
+    engineGame.homeTeam.core.teamName,
+    engineGame.homeTeam.core.abbreviation
+  ]
+    .map((value) => normalizeEntityName(value))
+    .filter(Boolean);
+  const awayNames = [
+    engineGame.awayTeam.core.teamName,
+    engineGame.awayTeam.core.abbreviation
+  ]
+    .map((value) => normalizeEntityName(value))
+    .filter(Boolean);
+  const targetStartMs = new Date(engineGame.startTime ?? '').getTime();
+
+  return normalizedLines
+    .map((event) => {
+      const eventStartMs = new Date(event.startsAt ?? '').getTime();
+      const timeDistanceHours =
+        Number.isFinite(eventStartMs) && Number.isFinite(targetStartMs)
+          ? Math.abs(eventStartMs - targetStartMs) / (60 * 60 * 1000)
+          : 99;
+      const nameScore =
+        getTeamMatchScore(normalizeEntityName(event.homeTeam), homeNames) +
+        getTeamMatchScore(normalizeEntityName(event.awayTeam), awayNames);
+
+      return {
+        eventId: event.eventId,
+        homeTeam: event.homeTeam,
+        awayTeam: event.awayTeam,
+        startsAt: event.startsAt,
+        linesCount: event.lines.length,
+        score: nameScore * 10 - timeDistanceHours
+      };
+    })
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3)
+    .map((event) => ({
+      eventId: event.eventId,
+      homeTeam: event.homeTeam,
+      awayTeam: event.awayTeam,
+      startsAt: event.startsAt,
+      linesCount: event.linesCount
+    }));
+}
+
+function logOddsNoMatch(
+  normalizedLines: NormalizedMarketLines,
+  engineGame: ReturnType<typeof mapEspnToEngineGame>,
+  oddsCacheUpdatedAt: string | null,
+  oddsRefreshUsed: boolean,
+  boardKey: string,
+  window: OddsBoardWindow,
+  diagnostics: OddsBoardDiagnostics
+) {
+  console.warn('[odds-match] no market event match', {
+    gameId: engineGame.gameId,
+    boardKey,
+    oddsCacheUpdatedAt,
+    oddsRefreshUsed,
+    cacheHit: diagnostics.cacheHit,
+    cacheValidForWindow: diagnostics.cacheValidForWindow,
+    eventsInsideWindow: diagnostics.eventsInsideWindow,
+    eventsOutsideWindow: diagnostics.eventsOutsideWindow,
+    refreshAttempted: diagnostics.refreshAttempted,
+    refreshFailedReason: diagnostics.refreshFailedReason,
+    oddsBoardWindow: window,
+    oddsBoardEventCount: normalizedLines.length,
+    espnHome: engineGame.homeTeam.core.teamName,
+    espnAway: engineGame.awayTeam.core.teamName,
+    espnStartTime: engineGame.startTime,
+    availableEvents: normalizedLines.slice(0, 5).map((event) => ({
+      eventId: event.eventId,
+      homeTeam: event.homeTeam,
+      awayTeam: event.awayTeam,
+      startsAt: event.startsAt,
+      linesCount: event.lines.length
+    })),
+    closestEvents: getClosestMarketEventsForLog(normalizedLines, engineGame)
+  });
 }
 
 function percentMove(current: number, opening: number): number {
@@ -1379,13 +1945,23 @@ export async function GET(req: NextRequest) {
     let oddsCacheUpdatedAt: string | null = null;
     let oddsRefreshUsed = false;
     let latestStoredMarket: Awaited<ReturnType<typeof getLatestMarketSnapshot>> = null;
+    const oddsBoardKey = getOddsBoardKey(engineGame.startTime);
+    const oddsBoardWindow = getOddsBoardWindow(engineGame.startTime);
 
     try {
-      const autoOdds = await getNormalizedMarketLinesAuto();
+      const autoOdds = await getNormalizedMarketLinesForBoard(
+        oddsBoardKey,
+        oddsBoardWindow
+      );
 
       oddsFetchWarning = autoOdds.oddsFetchWarning;
       oddsCacheUpdatedAt = autoOdds.oddsCacheUpdatedAt;
       oddsRefreshUsed = autoOdds.oddsRefreshUsed;
+      logOddsUsage({
+        gameId,
+        boardKey: oddsBoardKey,
+        diagnostics: autoOdds.diagnostics
+      });
 
       matchingMarketEvent = findMatchingMarketEvent(
         autoOdds.normalizedLines,
@@ -1393,11 +1969,50 @@ export async function GET(req: NextRequest) {
       );
 
       engineGame.odds = mapEventMarketLinesToGameOdds(matchingMarketEvent);
+
+      if (!matchingMarketEvent) {
+        logOddsNoMatch(
+          autoOdds.normalizedLines,
+          engineGame,
+          oddsCacheUpdatedAt,
+          oddsRefreshUsed,
+          oddsBoardKey,
+          oddsBoardWindow,
+          autoOdds.diagnostics
+        );
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown odds error';
 
       oddsFetchWarning = message;
+      logOddsUsage({
+        gameId,
+        boardKey: oddsBoardKey,
+        diagnostics: {
+          cacheHit: false,
+          cacheValidForWindow: false,
+          eventsInsideWindow: 0,
+          eventsOutsideWindow: 0,
+          refreshAttempted: true,
+          refreshFailedReason: message,
+          calledExternalOddsApi: false,
+          eventCountFetched: 0,
+          estimatedObjectsConsumed: 0,
+          reason: 'analyze-odds-error'
+        }
+      });
+      console.warn('[odds-match] odds refresh failed before matching', {
+        gameId: engineGame.gameId,
+        boardKey: oddsBoardKey,
+        oddsBoardWindow,
+        cacheHit: false,
+        cacheValidForWindow: false,
+        eventsInsideWindow: 0,
+        eventsOutsideWindow: 0,
+        refreshAttempted: true,
+        refreshFailedReason: message
+      });
     }
 
     if (!engineGame.odds) {

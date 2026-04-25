@@ -67,20 +67,28 @@ type SgoEvent = {
 type SportsGameOddsResponse = {
   success?: boolean;
   data?: SgoEvent[];
+  nextCursor?: string | null;
 };
 
-
-
-const ODDS_API_KEY =
-  typeof process !== 'undefined' ? process.env.ODDS_API_KEY : undefined;
-
-if (!ODDS_API_KEY) {
-  throw new Error('Falta ODDS_API_KEY en .env.local');
-}
+type FetchMlbMarketLinesOptions = {
+  startsAfter?: string;
+  startsBefore?: string;
+};
 
 let cachedMarketLinesResponse: SportsGameOddsResponse | null = null;
 let cachedMarketLinesAt = 0;
 const MARKET_LINES_CACHE_MS = 60 * 1000; // 1 minuto
+const ODDS_FETCH_TIMEOUT_MS = 9000;
+const ODDS_MAX_PAGES = 5;
+
+function getOddsApiKey(): string | undefined {
+  return typeof process !== 'undefined' ? process.env.ODDS_API_KEY : undefined;
+}
+
+function getApiKeyLast4(apiKey?: string): string | null {
+  if (!apiKey) return null;
+  return apiKey.slice(-4);
+}
 
 function americanToDecimal(value: string | number | undefined | null): number {
   if (value === undefined || value === null) return 0;
@@ -508,40 +516,206 @@ function sanitizeTotalLadders(lines: MarketLine[]): MarketLine[] {
   return sanitized;
 }
 
-async function fetchJSON(url: string): Promise<SportsGameOddsResponse> {
-  const res = await fetch(url, {
-    cache: 'no-store'
-  });
+function sanitizeOddsRequestUrl(url: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set('apiKey', 'REDACTED');
+  return parsed.toString();
+}
 
-  if (!res.ok) {
-    throw new Error(`Odds API error ${res.status}`);
-  }
+async function fetchJSON(
+  url: string,
+  timeoutMs: number
+): Promise<{
+  json: SportsGameOddsResponse;
+  status: number;
+}> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  const json: unknown = await res.json();
+  try {
+    const res = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
 
-  if (!json || typeof json !== 'object') {
+    if (!res.ok) {
+      const error = new Error(`Odds API error ${res.status}`) as Error & {
+        status?: number;
+      };
+      error.status = res.status;
+      throw error;
+    }
+
+    const json: unknown = await res.json();
+
+    if (!json || typeof json !== 'object') {
     throw new Error('Odds API devolvió una respuesta inválida');
   }
 
-  return json as SportsGameOddsResponse;
+    return {
+      json: json as SportsGameOddsResponse,
+      status: res.status
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-export async function fetchMlbMarketLines(): Promise<SportsGameOddsResponse> {
+function getNextCursor(json: SportsGameOddsResponse): string | null {
+  const payload = json as SportsGameOddsResponse & {
+    next_cursor?: string | null;
+    cursor?: string | null;
+    meta?: {
+      nextCursor?: string | null;
+      next_cursor?: string | null;
+    };
+  };
+
+  return (
+    payload.nextCursor ??
+    payload.next_cursor ??
+    payload.cursor ??
+    payload.meta?.nextCursor ??
+    payload.meta?.next_cursor ??
+    null
+  );
+}
+
+function buildEventsUrl(
+  options: FetchMlbMarketLinesOptions,
+  apiKey: string,
+  cursor?: string | null
+): string {
+  const params = new URLSearchParams({
+    leagueID: 'MLB',
+    oddsAvailable: 'true',
+    includeAltLines: 'true',
+    limit: '100',
+    apiKey
+  });
+
+  if (options.startsAfter) {
+    params.set('startsAfter', options.startsAfter);
+  }
+
+  if (options.startsBefore) {
+    params.set('startsBefore', options.startsBefore);
+  }
+
+  if (cursor) {
+    params.set('cursor', cursor);
+  }
+
+  return `https://api.sportsgameodds.com/v2/events?${params.toString()}`;
+}
+
+export async function fetchMlbMarketLines(
+  options: FetchMlbMarketLinesOptions = {}
+): Promise<SportsGameOddsResponse> {
   const now = Date.now();
+  const canUseMemoryCache = !options.startsAfter && !options.startsBefore;
+  const startedAt = Date.now();
+  const deadline = startedAt + ODDS_FETCH_TIMEOUT_MS;
+  const apiKey = getOddsApiKey();
+  let oddsRequestUrl: string | null = null;
+  let oddsHttpStatus: number | null = null;
+  let page = 0;
+  let nextCursorSeen = false;
+  let refreshFailedReason: string | null = null;
+  const allData: SgoEvent[] = [];
+
+  if (!apiKey) {
+    refreshFailedReason = 'Falta ODDS_API_KEY en .env.local';
+    console.warn('[odds-fetch] market board fetch failed', {
+      apiKeyPresent: false,
+      apiKeyLast4: null,
+      oddsRequestUrl,
+      oddsHttpStatus,
+      oddsFetchDurationMs: Date.now() - startedAt,
+      pageCount: page,
+      eventCountFetched: allData.length,
+      nextCursorSeen,
+      refreshFailedReason
+    });
+    throw new Error(refreshFailedReason);
+  }
 
   if (
+    canUseMemoryCache &&
     cachedMarketLinesResponse &&
     now - cachedMarketLinesAt < MARKET_LINES_CACHE_MS
   ) {
     return cachedMarketLinesResponse;
   }
 
-  const fresh = await fetchJSON(
-    `https://api.sportsgameodds.com/v2/events?leagueID=MLB&oddsAvailable=true&includeAltLines=true&apiKey=${ODDS_API_KEY}`
-  );
+  let nextCursor: string | null | undefined = null;
+  let lastResponse: SportsGameOddsResponse | null = null;
 
-  cachedMarketLinesResponse = fresh;
-  cachedMarketLinesAt = now;
+  try {
+    do {
+      const remainingMs = deadline - Date.now();
+
+      if (remainingMs <= 0) {
+        throw new Error(`Odds API timeout after ${ODDS_FETCH_TIMEOUT_MS}ms`);
+      }
+
+      const url = buildEventsUrl(options, apiKey, nextCursor);
+      oddsRequestUrl = oddsRequestUrl ?? sanitizeOddsRequestUrl(url);
+
+      page += 1;
+
+      const fresh = await fetchJSON(url, remainingMs);
+      oddsHttpStatus = fresh.status;
+      lastResponse = fresh.json;
+      allData.push(...(fresh.json.data ?? []));
+      nextCursor = getNextCursor(fresh.json);
+      nextCursorSeen = nextCursorSeen || Boolean(nextCursor);
+    } while (nextCursor && page < ODDS_MAX_PAGES);
+  } catch (error) {
+    refreshFailedReason =
+      error instanceof Error ? error.message : 'Unknown odds error';
+    oddsHttpStatus =
+      typeof (error as { status?: unknown }).status === 'number'
+        ? (error as { status: number }).status
+        : oddsHttpStatus;
+
+    console.warn('[odds-fetch] market board fetch failed', {
+      apiKeyPresent: Boolean(apiKey),
+      apiKeyLast4: getApiKeyLast4(apiKey),
+      oddsRequestUrl,
+      oddsHttpStatus,
+      oddsFetchDurationMs: Date.now() - startedAt,
+      pageCount: page,
+      eventCountFetched: allData.length,
+      nextCursorSeen,
+      refreshFailedReason
+    });
+
+    throw error;
+  }
+
+  const fresh: SportsGameOddsResponse = {
+    ...(lastResponse ?? {}),
+    data: allData,
+    nextCursor
+  };
+
+  console.warn('[odds-fetch] market board fetch complete', {
+    apiKeyPresent: Boolean(apiKey),
+    apiKeyLast4: getApiKeyLast4(apiKey),
+    oddsRequestUrl,
+    oddsHttpStatus,
+    oddsFetchDurationMs: Date.now() - startedAt,
+    pageCount: page,
+    eventCountFetched: allData.length,
+    nextCursorSeen,
+    refreshFailedReason
+  });
+
+  if (canUseMemoryCache) {
+    cachedMarketLinesResponse = fresh;
+    cachedMarketLinesAt = now;
+  }
 
   return fresh;
 }

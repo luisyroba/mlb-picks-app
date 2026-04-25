@@ -38,12 +38,14 @@ type PremiumPickResult = {
   market: string;
   selection: string;
   confidence: string;
+  status?: string;
   score: number;
   edge: number | null;
   ev: number | null;
   estimatedProbability: number | null;
   impliedProbability: number | null;
   executionOdds: number | null;
+  profitUnits?: number | null;
   gameStartTime: string | null;
   lockedAt?: string;
   lockReason?: string;
@@ -100,17 +102,20 @@ type SolidPickPoint = {
 };
 
 type TodayRankingItem = {
+  rank: 1 | 2 | 3;
   gameId: string;
   gameLabel: string;
   market: string;
   selection: string;
   confidence: string;
+  status: string;
   score: number;
   edge: number | null;
   ev: number | null;
   estimatedProbability: number | null;
   impliedProbability: number | null;
   executionOdds: number | null;
+  profitUnits: number | null;
   gameStartTime: string | null;
   prevScore: number | null;
   prevEdge: number | null;
@@ -923,8 +928,8 @@ function buildDailySummary(
       market: currentPremiumContext.premiumPick.market,
       selection: currentPremiumContext.premiumPick.selection,
       confidence: currentPremiumContext.premiumPick.confidence,
-      status: 'pending',
-      profitUnits: null
+      status: currentPremiumContext.premiumPick.status ?? 'pending',
+      profitUnits: currentPremiumContext.premiumPick.profitUnits ?? null
     });
 
     if (!byDate.has(currentDateKey)) {
@@ -1440,7 +1445,6 @@ const rawTodayCandidates = pickRecords
   .filter((pick) => {
     return (
       String(pick.confidence ?? '') === 'A' &&
-      String(pick.status ?? '') === 'pending' &&
       String(pick.game_date_key ?? '') === todayDateKey
     );
   })
@@ -1460,6 +1464,7 @@ const rawTodayCandidates = pickRecords
       market: String(pick.execution_market || pick.market || 'UNKNOWN'),
       selection: buildExecutionTitle(pick as Record<string, unknown>),
       confidence: String(pick.confidence ?? ''),
+      status: String(pick.status ?? 'pending'),
       score: getSolidPickScore(pick as Record<string, unknown>),
       edge: roundMetric(getEffectiveEdge(pick as Record<string, unknown>)),
       ev: roundMetric(getEffectiveEv(pick as Record<string, unknown>)),
@@ -1471,6 +1476,10 @@ const rawTodayCandidates = pickRecords
           : typeof pick.odds === 'number' && Number.isFinite(pick.odds)
             ? pick.odds
             : null,
+      profitUnits:
+        typeof pick.profit_units === 'number' && Number.isFinite(pick.profit_units)
+          ? roundMetric(pick.profit_units)
+          : null,
       gameStartTime:
         typeof pick.game_start_time === 'string' ? pick.game_start_time : null
     };
@@ -1487,26 +1496,31 @@ const rawTodayCandidates = pickRecords
 
     const solidTodayRanking: TodayRankingItem[] = [...dedupGroups.values()]
       .map((group) => {
-        const sorted = [...group].sort((a, b) => b.score - a.score);
-        const current = sorted[0];
-        const prev = sorted.length > 1 ? sorted[1] : null;
-        return {
-          ...current,
+    const sorted = [...group].sort((a, b) => b.score - a.score);
+    const current = sorted[0];
+    const prev = sorted.length > 1 ? sorted[1] : null;
+    return {
+      ...current,
           prevScore: prev?.score ?? null,
           prevEdge: prev?.edge ?? null,
           prevEv: prev?.ev ?? null,
           prevEstimatedProbability: prev?.estimatedProbability ?? null,
-          prevImpliedProbability: prev?.impliedProbability ?? null,
-          prevExecutionOdds: prev?.executionOdds ?? null,
-        };
-      })
-      .sort(
+      prevImpliedProbability: prev?.impliedProbability ?? null,
+      prevExecutionOdds: prev?.executionOdds ?? null,
+    };
+  })
+  .sort(
         (a, b) =>
           b.score - a.score ||
           (b.edge ?? 0) - (a.edge ?? 0) ||
           (b.ev ?? 0) - (a.ev ?? 0) ||
           a.gameId.localeCompare(b.gameId)
-      );
+  )
+  .slice(0, 3)
+  .map((item, index) => ({
+    ...item,
+    rank: (index + 1) as 1 | 2 | 3
+  }));
 
     // --- Premium daily lock (DB-backed, cross-device) ---
     let lockPayload = await getPremiumDailyLock(todayDateKey).catch(() => null);
@@ -1558,7 +1572,60 @@ const rawTodayCandidates = pickRecords
     let betterPick: PremiumPickResult | null = null;
 
     if (premiumClosed) {
-      // Day closed — locked game settled; don't surface a new pick or ranking
+      const p = lockPayload as Record<string, unknown> | null;
+      const closedGameId = String(p?.gameId ?? '');
+      const closedPickRecord = closedGameId
+        ? pickRecords.find((pick) => String(pick.game_id ?? '') === closedGameId) ?? null
+        : null;
+
+      if (closedGameId) {
+        premiumPick = {
+          gameId: closedGameId,
+          gameLabel:
+            closedPickRecord?.game_label ??
+            resolveMatchupLabel({
+              fallbackGameLabel: String(p?.gameLabel ?? ''),
+              marketSnapshot: marketSnapshotsByGameId.get(closedGameId) ?? null,
+              gameId: closedGameId
+            }),
+          market: String(p?.marketType ?? p?.market ?? ''),
+          selection: String(p?.selection ?? ''),
+          confidence: String(closedPickRecord?.confidence ?? p?.confidence ?? ''),
+          status: String(closedPickRecord?.status ?? p?.status ?? 'pending'),
+          score: typeof p?.score === 'number' ? p.score : 0,
+          edge: typeof p?.edge === 'number' ? p.edge : null,
+          ev: typeof p?.ev === 'number' ? p.ev : null,
+          estimatedProbability: typeof p?.probability === 'number' ? p.probability : null,
+          impliedProbability: typeof p?.impliedProbability === 'number' ? p.impliedProbability : null,
+          executionOdds: typeof p?.odds === 'number' ? p.odds : null,
+          profitUnits:
+            typeof closedPickRecord?.profit_units === 'number'
+              ? roundMetric(closedPickRecord.profit_units)
+              : typeof p?.profitUnits === 'number'
+                ? roundMetric(p.profitUnits)
+                : null,
+          gameStartTime: typeof p?.gameStartTime === 'string' ? p.gameStartTime : null,
+          lockedAt: typeof p?.lockedAt === 'string' ? p.lockedAt : undefined,
+          lockReason: typeof p?.lockReason === 'string' ? p.lockReason : undefined
+        };
+      } else if (liveTop) {
+        premiumPick = {
+          gameId: liveTop.gameId,
+          gameLabel: liveTop.gameLabel,
+          market: liveTop.market,
+          selection: liveTop.selection,
+          confidence: liveTop.confidence,
+          status: liveTop.status,
+          score: liveTop.score,
+          edge: liveTop.edge,
+          ev: liveTop.ev,
+          estimatedProbability: liveTop.estimatedProbability,
+          impliedProbability: liveTop.impliedProbability,
+          executionOdds: liveTop.executionOdds,
+          profitUnits: liveTop.profitUnits,
+          gameStartTime: liveTop.gameStartTime
+        };
+      }
     } else if (isLocked && lockPayload) {
       const p = lockPayload as Record<string, unknown>;
       const lockedGameId = String(p.gameId ?? '');
@@ -1575,12 +1642,19 @@ const rawTodayCandidates = pickRecords
         market: String(p.marketType ?? p.market ?? ''),
         selection: String(p.selection ?? ''),
         confidence: String(lockedPickRecord?.confidence ?? p.confidence ?? ''),
+        status: String(lockedPickRecord?.status ?? p.status ?? 'pending'),
         score: typeof p.score === 'number' ? p.score : 0,
         edge: typeof p.edge === 'number' ? p.edge : null,
         ev: typeof p.ev === 'number' ? p.ev : null,
         estimatedProbability: typeof p.probability === 'number' ? p.probability : null,
         impliedProbability: typeof p.impliedProbability === 'number' ? p.impliedProbability : null,
         executionOdds: typeof p.odds === 'number' ? p.odds : null,
+        profitUnits:
+          typeof lockedPickRecord?.profit_units === 'number'
+            ? roundMetric(lockedPickRecord.profit_units)
+            : typeof p.profitUnits === 'number'
+              ? roundMetric(p.profitUnits)
+              : null,
         gameStartTime: typeof p.gameStartTime === 'string' ? p.gameStartTime : null,
         lockedAt: typeof p.lockedAt === 'string' ? p.lockedAt : undefined,
         lockReason: typeof p.lockReason === 'string' ? p.lockReason : undefined
@@ -1614,12 +1688,14 @@ const rawTodayCandidates = pickRecords
         market: liveTop.market,
         selection: liveTop.selection,
         confidence: liveTop.confidence,
+        status: liveTop.status,
         score: liveTop.score,
         edge: liveTop.edge,
         ev: liveTop.ev,
         estimatedProbability: liveTop.estimatedProbability,
         impliedProbability: liveTop.impliedProbability,
         executionOdds: liveTop.executionOdds,
+        profitUnits: liveTop.profitUnits,
         gameStartTime: liveTop.gameStartTime
       };
     }
@@ -1666,7 +1742,7 @@ const rawTodayCandidates = pickRecords
     const baseCurrentPremiumContext: CurrentPremiumContext = {
       todayDateKey,
       premiumPick,
-      todayRanking: premiumClosed ? [] : solidTodayRanking,
+      todayRanking: solidTodayRanking,
       isLocked,
       isClosed: premiumClosed,
       betterPickPostLock,
@@ -1786,7 +1862,7 @@ summary: {
             history: audit.history
           };
         }),
-        todayRanking: premiumClosed ? [] : solidTodayRanking,
+        todayRanking: solidTodayRanking,
         premiumPick,
         isLocked,
         isClosed: premiumClosed,

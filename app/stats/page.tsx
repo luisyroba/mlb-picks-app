@@ -158,17 +158,20 @@ type SegmentedPremiumView = {
   history: SolidPickHistoryItem[];
   currentPick: PremiumPanelPick | null;
   todayRanking: {
+    rank: 1 | 2 | 3;
     gameId: string;
     gameLabel: string;
     market: string;
     selection: string;
     confidence: string;
+    status: string;
     score: number;
     edge: number | null;
     ev: number | null;
     estimatedProbability: number | null;
     impliedProbability: number | null;
     executionOdds: number | null;
+    profitUnits: number | null;
     gameStartTime: string | null;
     prevScore: number | null;
     prevEdge: number | null;
@@ -254,17 +257,20 @@ type StatsResponse = {
     rankHistories?: PremiumRankHistory[];
     history: SolidPickHistoryItem[];
     todayRanking?: {
+      rank: 1 | 2 | 3;
       gameId: string;
       gameLabel: string;
       market: string;
       selection: string;
       confidence: string;
+      status: string;
       score: number;
       edge: number | null;
       ev: number | null;
       estimatedProbability: number | null;
       impliedProbability: number | null;
       executionOdds: number | null;
+      profitUnits: number | null;
       gameStartTime: string | null;
       prevScore: number | null;
       prevEdge: number | null;
@@ -1282,15 +1288,17 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                         null;
                       const betterPostLock = selectedDataMode === 'live' && premiumView.betterPickPostLock;
                       const betterPickData = premiumView.betterPick;
-                      const topItems = todayTopPicks.map((item, idx) => ({
-                        rank: idx + 1,
+                      const topItems = todayTopPicks.map((item) => ({
+                        rank: item.rank,
                         gameId: item.gameId,
                         market: item.market,
                         selection: item.selection,
                         confidence: item.confidence,
+                        status: item.status,
                         gameLabel: resolveMatchupLabel(item.gameId, item.gameLabel, stats?.recent),
                         score: item.score,
                         odds: item.executionOdds ?? null,
+                        profitUnits: item.profitUnits ?? null,
                         edge: item.edge ?? null,
                         ev: item.ev ?? null,
                         estimatedProbability: item.estimatedProbability ?? null,

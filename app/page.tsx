@@ -174,6 +174,8 @@ type StatsPremiumPick = {
   ev?: number | null;
   executionOdds?: number | null;
   line?: number | null;
+  status?: string;
+  profitUnits?: number | null;
   note?: string | null;
 };
 
@@ -2149,7 +2151,7 @@ export default function HomePage() {
   useEffect(() => {
     if (premiumDayClosed === null) return;
 
-    if (premiumDayClosed || !statsPremiumPick) {
+    if (!statsPremiumPick) {
       setSolidDailyPick(null);
       return;
     }
@@ -2174,6 +2176,13 @@ export default function HomePage() {
       ev: statsPremiumPick.ev ?? null,
       note: statsPremiumPick.note ?? null,
       lockedAt: new Date().toISOString(),
+      settledStatus:
+        statsPremiumPick.status === 'won' ||
+        statsPremiumPick.status === 'lost' ||
+        statsPremiumPick.status === 'void'
+          ? statsPremiumPick.status
+          : undefined,
+      profitUnits: statsPremiumPick.profitUnits ?? null,
       game: sourceGames.find((game) => String(game.gameId) === String(statsPremiumPick.gameId)) ?? null
     });
   }, [games, premiumDayClosed, statsPremiumPick, todayGamesCache]);
