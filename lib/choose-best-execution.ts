@@ -201,6 +201,49 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function getReferenceLineValue(
+  line: MarketLine,
+  preferredSide: 'home' | 'away' | 'over' | 'under'
+): number {
+  if (line.line === undefined || line.line === null) {
+    return 0;
+  }
+
+  if (preferredSide === 'over' || preferredSide === 'under') {
+    return line.line;
+  }
+
+  return line.line;
+}
+
+function getExecutionLineDistance(
+  line: MarketLine,
+  preferredSide: 'home' | 'away' | 'over' | 'under',
+  referenceLine?: number | null
+): number {
+  const candidateValue = getReferenceLineValue(line, preferredSide);
+  const referenceValue =
+    referenceLine === undefined || referenceLine === null ? 0 : referenceLine;
+
+  return Math.abs(candidateValue - referenceValue);
+}
+
+function getMaxExecutionLineDistance(
+  marketType: 'ML' | 'RL' | 'TOTAL' | 'F5',
+  preferredSide: 'home' | 'away' | 'over' | 'under',
+  referenceLine?: number | null
+): number {
+  if (marketType === 'TOTAL') {
+    return 2;
+  }
+
+  if (marketType === 'F5' && (preferredSide === 'over' || preferredSide === 'under')) {
+    return 1;
+  }
+
+  return 1.5;
+}
+
 function getReturnScore(odds: number, config: TierExecutionConfig): number {
   if (odds >= config.idealMinOdds && odds <= config.idealMaxOdds) {
     const center = (config.idealMinOdds + config.idealMaxOdds) / 2;
@@ -352,6 +395,11 @@ export function chooseBestExecution(
     side: preferredSide
   };
   const referenceThreshold = getRiskThreshold(referenceCandidate, preferredSide);
+  const maxLineDistance = getMaxExecutionLineDistance(
+    marketType,
+    preferredSide,
+    referenceLine
+  );
 
   const candidates = lines.lines
     .filter(
@@ -368,6 +416,11 @@ export function chooseBestExecution(
     .filter(
       (line) =>
         getRiskThreshold(line, preferredSide) <= referenceThreshold + 0.001
+    )
+    .filter(
+      (line) =>
+        getExecutionLineDistance(line, preferredSide, referenceLine) <=
+        maxLineDistance + 0.001
     )
     .filter((line) => line.odds >= config.hardMinOdds);
 
@@ -409,13 +462,23 @@ export function chooseBestExecution(
       config
     );
     const modelScore = getModelScore(evaluation);
+    const lineDistance = getExecutionLineDistance(
+      line,
+      preferredSide,
+      referenceLine
+    );
+    const distancePenalty =
+      maxLineDistance > 0
+        ? (lineDistance / maxLineDistance) * 8
+        : 0;
 
     let executionScore =
       protectionScore * 0.42 +
       modelScore * 0.34 +
       returnScore * 0.24 -
       conservativePenalty -
-      aggressivePenalty;
+      aggressivePenalty -
+      distancePenalty;
 
     if (
       line.odds >= config.idealMinOdds &&

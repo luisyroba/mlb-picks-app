@@ -16,6 +16,59 @@ import {
 } from './probability-model';
 import { SCORING_THRESHOLDS } from './weights';
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getMarketReliability(
+  market: Exclude<MarketType, 'PASS'>,
+  selection: string
+): number {
+  if (market === 'ML') return 1;
+  if (market === 'RL') return 0.97;
+  if (market === 'TOTAL') return 0.95;
+
+  return /(^|\s)(over|under)(\s|$)/i.test(selection) ? 0.94 : 0.96;
+}
+
+function getConfidenceScore(confidence: 'A' | 'B' | 'C'): number {
+  if (confidence === 'A') return 1;
+  if (confidence === 'B') return 0.78;
+  return 0.56;
+}
+
+function getSelectionScore(
+  candidate: Omit<MarketEvaluation, 'selectionScore'>
+): number {
+  const probabilityBaseline = Math.max(0.45, candidate.impliedProbability);
+  const probabilitySpan = Math.max(0.08, 0.9 - probabilityBaseline);
+  const probabilityScore = clamp(
+    (candidate.estimatedProbability - probabilityBaseline) / probabilitySpan,
+    0,
+    1
+  );
+  const edgeScore = clamp(candidate.edge / 0.22, 0, 1);
+  const evScore = clamp(candidate.ev / 0.38, 0, 1);
+  const confidenceScore = getConfidenceScore(
+    candidate.confidence === 'PASS' ? 'C' : candidate.confidence
+  );
+  const marketReliability = getMarketReliability(
+    candidate.market,
+    candidate.selection
+  );
+
+  return Number(
+    (
+      (evScore * 0.36 +
+        edgeScore * 0.32 +
+        probabilityScore * 0.2 +
+        confidenceScore * 0.12) *
+      100 *
+      marketReliability
+    ).toFixed(3)
+  );
+}
+
 function buildEvaluation(
   market: Exclude<MarketType, 'PASS'>,
   selection: string,
@@ -36,7 +89,7 @@ function buildEvaluation(
     confidence = 'B';
   }
 
-  return {
+  const evaluation: Omit<MarketEvaluation, 'selectionScore'> = {
     market,
     selection,
     line,
@@ -47,6 +100,11 @@ function buildEvaluation(
     ev,
     confidence,
     reason
+  };
+
+  return {
+    ...evaluation,
+    selectionScore: getSelectionScore(evaluation)
   };
 }
 
@@ -67,37 +125,35 @@ function evaluateML(
   if (!odds) return [];
 
   const margin = distribution.marginMean;
-  if (Math.abs(margin) < 0.16) {
-    return [];
-  }
+  const evaluations: MarketEvaluation[] = [];
 
-  if (margin > 0 && odds.homeML) {
+  if (odds.homeML) {
     const prob = probabilityMoneyline(distribution, 'home');
-    return [
+    evaluations.push(
       buildEvaluation(
         'ML',
         game.homeTeam.core.teamName,
         odds.homeML,
         prob,
-        `Margen esperado ${margin.toFixed(2)} carreras local. Precio justo ${fairOdds(prob).toFixed(2)} vs cuota ${odds.homeML.toFixed(2)}`
+        `Margen esperado ${margin.toFixed(2)} carreras para ${game.homeTeam.core.teamName}. Precio justo ${fairOdds(prob).toFixed(2)} vs cuota ${odds.homeML.toFixed(2)}`
       )
-    ];
+    );
   }
 
-  if (margin < 0 && odds.awayML) {
+  if (odds.awayML) {
     const prob = probabilityMoneyline(distribution, 'away');
-    return [
+    evaluations.push(
       buildEvaluation(
         'ML',
         game.awayTeam.core.teamName,
         odds.awayML,
         prob,
-        `Margen esperado ${Math.abs(margin).toFixed(2)} carreras visitante. Precio justo ${fairOdds(prob).toFixed(2)} vs cuota ${odds.awayML.toFixed(2)}`
+        `Margen esperado ${Math.abs(margin).toFixed(2)} carreras para ${game.awayTeam.core.teamName}. Precio justo ${fairOdds(prob).toFixed(2)} vs cuota ${odds.awayML.toFixed(2)}`
       )
-    ];
+    );
   }
 
-  return [];
+  return evaluations;
 }
 
 function evaluateRL(
@@ -404,5 +460,22 @@ export function evaluateMarkets(
 
   return candidates
     .filter((candidate) => candidate.edge > 0 && candidate.ev > 0)
-    .sort((left, right) => right.ev - left.ev);
+    .sort((left, right) => {
+      const scoreGap =
+        (right.selectionScore ?? right.ev) - (left.selectionScore ?? left.ev);
+
+      if (scoreGap !== 0) {
+        return scoreGap;
+      }
+
+      if (right.edge !== left.edge) {
+        return right.edge - left.edge;
+      }
+
+      if (right.ev !== left.ev) {
+        return right.ev - left.ev;
+      }
+
+      return right.estimatedProbability - left.estimatedProbability;
+    });
 }

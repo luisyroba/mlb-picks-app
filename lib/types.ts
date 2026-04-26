@@ -262,6 +262,7 @@ export interface MarketEvaluation {
 
   confidence: ConfidenceLevel;
   reason: string;
+  selectionScore?: number;
 }
 
 export interface StoredAlternativeMarket {
@@ -275,6 +276,7 @@ export interface StoredAlternativeMarket {
   ev: number;
   confidence: ConfidenceLevel;
   reason: string;
+  selectionScore?: number;
 }
 
 export interface FinalPickDecision {
@@ -287,6 +289,7 @@ export interface FinalPickDecision {
   impliedProbability?: number;
   edge?: number;
   ev?: number;
+  selectionScore?: number;
 
   confidence: ConfidenceLevel;
   executionReason: string;

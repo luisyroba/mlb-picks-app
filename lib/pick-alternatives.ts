@@ -20,7 +20,10 @@ function toStoredAlternativeMarket(
     edge: candidate.edge,
     ev: candidate.ev,
     confidence: candidate.confidence,
-    reason: candidate.reason
+    reason: candidate.reason,
+    selectionScore: isFiniteNumber(candidate.selectionScore)
+      ? candidate.selectionScore
+      : undefined
   };
 }
 
@@ -63,7 +66,10 @@ export function parseStoredAlternativeMarket(
       edge: parsed.edge,
       ev: parsed.ev,
       confidence: parsed.confidence as StoredAlternativeMarket['confidence'],
-      reason: parsed.reason
+      reason: parsed.reason,
+      selectionScore: isFiniteNumber(parsed.selectionScore)
+        ? parsed.selectionScore
+        : undefined
     };
   } catch {
     const [market, selection] = value.split('|').map((part) => part.trim());

@@ -1,0 +1,7 @@
+"use strict";
+// lib/types.ts
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.LINEUP_QUALITY_ADJUSTMENT_DIFF_SCALE = exports.LINEUP_QUALITY_ADJUSTMENT_MAX = exports.LINEUP_QUALITY_ADJUSTMENT_MIN = void 0;
+exports.LINEUP_QUALITY_ADJUSTMENT_MIN = -45;
+exports.LINEUP_QUALITY_ADJUSTMENT_MAX = 20;
+exports.LINEUP_QUALITY_ADJUSTMENT_DIFF_SCALE = exports.LINEUP_QUALITY_ADJUSTMENT_MAX - exports.LINEUP_QUALITY_ADJUSTMENT_MIN;

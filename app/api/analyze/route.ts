@@ -1077,6 +1077,7 @@ function buildExecutionAdjustedFinalPick(
     impliedProbability: evaluatedRecommendation.impliedProbability,
     edge: evaluatedRecommendation.edge,
     ev: evaluatedRecommendation.ev,
+    selectionScore: evaluatedRecommendation.selectionScore,
     confidence: evaluatedRecommendation.confidence,
     executionReason: evaluatedRecommendation.reason,
     altMarket1: executionRecommendation?.alternativeEvaluation1

@@ -54,6 +54,7 @@ function toFinalPick(
     impliedProbability: best.impliedProbability,
     edge: best.edge,
     ev: best.ev,
+    selectionScore: best.selectionScore,
 
     confidence: best.confidence,
     executionReason: best.reason,
@@ -140,12 +141,19 @@ function rankAlternativeCandidates(
       return diversityGap;
     }
 
-    if (right.ev !== left.ev) {
-      return right.ev - left.ev;
+    const scoreGap =
+      (right.selectionScore ?? right.ev) - (left.selectionScore ?? left.ev);
+
+    if (scoreGap !== 0) {
+      return scoreGap;
     }
 
     if (right.edge !== left.edge) {
       return right.edge - left.edge;
+    }
+
+    if (right.ev !== left.ev) {
+      return right.ev - left.ev;
     }
 
     return right.estimatedProbability - left.estimatedProbability;
@@ -230,12 +238,22 @@ export function chooseBestPick(
       (entry): entry is RecalculatedCandidateResult => entry !== null
     )
     .sort((left, right) => {
-      if (right.confirmedCandidate.ev !== left.confirmedCandidate.ev) {
-        return right.confirmedCandidate.ev - left.confirmedCandidate.ev;
+      const scoreGap =
+        (right.confirmedCandidate.selectionScore ??
+          right.confirmedCandidate.ev) -
+        (left.confirmedCandidate.selectionScore ??
+          left.confirmedCandidate.ev);
+
+      if (scoreGap !== 0) {
+        return scoreGap;
       }
 
       if (right.confirmedCandidate.edge !== left.confirmedCandidate.edge) {
         return right.confirmedCandidate.edge - left.confirmedCandidate.edge;
+      }
+
+      if (right.confirmedCandidate.ev !== left.confirmedCandidate.ev) {
+        return right.confirmedCandidate.ev - left.confirmedCandidate.ev;
       }
 
       return (
