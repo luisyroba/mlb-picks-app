@@ -21,6 +21,7 @@ import {
   normalizeMarketLines,
   mapEventMarketLinesToGameOdds
 } from '@/lib/market-lines';
+import { buildAuditMetrics } from '@/lib/audit-metrics';
 import {
   saveMarketSnapshot,
   getLatestMarketSnapshot,
@@ -367,6 +368,205 @@ function logOddsUsage(payload: {
     estimatedObjectsConsumed: payload.diagnostics.estimatedObjectsConsumed,
     reason: payload.diagnostics.reason
   });
+}
+
+function buildExecutionFallbackLines(
+  game: ReturnType<typeof mapEspnToEngineGame>
+): ReturnType<typeof findMatchingMarketEvent> {
+  const odds = game.odds;
+
+  if (!odds) return null;
+
+  const lines = [];
+  const homeTeam = game.homeTeam.core.teamName;
+  const awayTeam = game.awayTeam.core.teamName;
+
+  if (typeof odds.homeML === 'number' && Number.isFinite(odds.homeML)) {
+    lines.push({
+      marketType: 'ML' as const,
+      selection: homeTeam,
+      odds: odds.homeML,
+      side: 'home' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (typeof odds.awayML === 'number' && Number.isFinite(odds.awayML)) {
+    lines.push({
+      marketType: 'ML' as const,
+      selection: awayTeam,
+      odds: odds.awayML,
+      side: 'away' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.homeRL?.line === 'number' &&
+    Number.isFinite(odds.homeRL.line) &&
+    typeof odds.homeRL.odds === 'number' &&
+    Number.isFinite(odds.homeRL.odds)
+  ) {
+    lines.push({
+      marketType: 'RL' as const,
+      selection: homeTeam,
+      line: odds.homeRL.line,
+      odds: odds.homeRL.odds,
+      side: 'home' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.awayRL?.line === 'number' &&
+    Number.isFinite(odds.awayRL.line) &&
+    typeof odds.awayRL.odds === 'number' &&
+    Number.isFinite(odds.awayRL.odds)
+  ) {
+    lines.push({
+      marketType: 'RL' as const,
+      selection: awayTeam,
+      line: odds.awayRL.line,
+      odds: odds.awayRL.odds,
+      side: 'away' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.total?.line === 'number' &&
+    Number.isFinite(odds.total.line) &&
+    typeof odds.total.overOdds === 'number' &&
+    Number.isFinite(odds.total.overOdds) &&
+    typeof odds.total.underOdds === 'number' &&
+    Number.isFinite(odds.total.underOdds)
+  ) {
+    lines.push({
+      marketType: 'TOTAL' as const,
+      selection: 'Over',
+      line: odds.total.line,
+      odds: odds.total.overOdds,
+      side: 'over' as const,
+      origin: 'main' as const
+    });
+    lines.push({
+      marketType: 'TOTAL' as const,
+      selection: 'Under',
+      line: odds.total.line,
+      odds: odds.total.underOdds,
+      side: 'under' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (typeof odds.homeF5ML === 'number' && Number.isFinite(odds.homeF5ML)) {
+    lines.push({
+      marketType: 'F5' as const,
+      selection: homeTeam,
+      odds: odds.homeF5ML,
+      side: 'home' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (typeof odds.awayF5ML === 'number' && Number.isFinite(odds.awayF5ML)) {
+    lines.push({
+      marketType: 'F5' as const,
+      selection: awayTeam,
+      odds: odds.awayF5ML,
+      side: 'away' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.homeF5RL?.line === 'number' &&
+    Number.isFinite(odds.homeF5RL.line) &&
+    typeof odds.homeF5RL.odds === 'number' &&
+    Number.isFinite(odds.homeF5RL.odds)
+  ) {
+    lines.push({
+      marketType: 'F5' as const,
+      selection: homeTeam,
+      line: odds.homeF5RL.line,
+      odds: odds.homeF5RL.odds,
+      side: 'home' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.awayF5RL?.line === 'number' &&
+    Number.isFinite(odds.awayF5RL.line) &&
+    typeof odds.awayF5RL.odds === 'number' &&
+    Number.isFinite(odds.awayF5RL.odds)
+  ) {
+    lines.push({
+      marketType: 'F5' as const,
+      selection: awayTeam,
+      line: odds.awayF5RL.line,
+      odds: odds.awayF5RL.odds,
+      side: 'away' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (
+    typeof odds.f5Total?.line === 'number' &&
+    Number.isFinite(odds.f5Total.line) &&
+    typeof odds.f5Total.overOdds === 'number' &&
+    Number.isFinite(odds.f5Total.overOdds) &&
+    typeof odds.f5Total.underOdds === 'number' &&
+    Number.isFinite(odds.f5Total.underOdds)
+  ) {
+    lines.push({
+      marketType: 'F5' as const,
+      selection: 'F5 Over',
+      line: odds.f5Total.line,
+      odds: odds.f5Total.overOdds,
+      side: 'over' as const,
+      origin: 'main' as const
+    });
+    lines.push({
+      marketType: 'F5' as const,
+      selection: 'F5 Under',
+      line: odds.f5Total.line,
+      odds: odds.f5Total.underOdds,
+      side: 'under' as const,
+      origin: 'main' as const
+    });
+  }
+
+  if (!lines.length) {
+    return null;
+  }
+
+  return {
+    eventId: `fallback-market-snapshot:${game.gameId}`,
+    homeTeam,
+    awayTeam,
+    startsAt: game.startTime ?? null,
+    lines
+  };
+}
+
+function logAnalyzeDebug(input: {
+  gameId: string;
+  gameStartTime: string | null | undefined;
+  boardKey: string;
+  boardDateKey: string;
+  nowDateKey: string;
+  userTimezone: string;
+  marketsFound: number;
+  marketCandidates: number;
+  hasMatchingMarketEvent: boolean;
+  usedStoredOddsFallback: boolean;
+  oddsApiKeyPresent: boolean;
+  oddsFetchWarning: string | null;
+  finalStatus: string;
+  finalReason: string;
+}) {
+  console.warn('[analyze-debug]', input);
 }
 
 async function getNormalizedMarketLinesForBoard(
@@ -1310,6 +1510,13 @@ function buildAnalyzePayload(
   matchingMarketEvent: ReturnType<typeof findMatchingMarketEvent>,
   executionRecommendation: ReturnType<typeof chooseBestExecution> | null
 ) {
+  const finalPickAuditMetrics = buildAuditMetrics({
+    estimatedProbability: finalPick.estimatedProbability ?? null,
+    impliedProbability: finalPick.impliedProbability ?? null,
+    odds: finalPick.odds ?? null,
+    edge: finalPick.edge ?? null,
+    ev: finalPick.ev ?? null
+  });
   const normalizedExecutionRecommendation = executionRecommendation
     ? {
         ...executionRecommendation,
@@ -1328,7 +1535,10 @@ function buildAnalyzePayload(
     marketCandidates,
     marketView,
     finalDecision,
-    finalPick,
+    finalPick: {
+      ...finalPick,
+      ...finalPickAuditMetrics
+    },
     matchingMarketEvent,
     executionRecommendation: normalizedExecutionRecommendation,
 
@@ -1355,7 +1565,13 @@ function buildAnalyzePayload(
               confidence: finalPick.confidence,
               probability: roundMetric(finalPick.estimatedProbability),
               edge: roundMetric(finalPick.edge),
-              ev: roundMetric(finalPick.ev)
+              ev: roundMetric(finalPick.ev),
+              p_raw: roundMetric(finalPickAuditMetrics.p_raw),
+              p_calibrated: roundMetric(finalPickAuditMetrics.p_calibrated),
+              edge_raw: roundMetric(finalPickAuditMetrics.edge_raw),
+              edge_calibrated: roundMetric(finalPickAuditMetrics.edge_calibrated),
+              ev_raw: roundMetric(finalPickAuditMetrics.ev_raw),
+              ev_calibrated: roundMetric(finalPickAuditMetrics.ev_calibrated)
             }
           : {
               market: 'PASS',
@@ -1363,7 +1579,13 @@ function buildAnalyzePayload(
               confidence: 'PASS',
               probability: null,
               edge: null,
-              ev: null
+              ev: null,
+              p_raw: null,
+              p_calibrated: null,
+              edge_raw: null,
+              edge_calibrated: null,
+              ev_raw: null,
+              ev_calibrated: null
             },
 
       execution:
@@ -2123,11 +2345,14 @@ export async function GET(req: NextRequest) {
       finalPick,
       engineGame
     );
+    const fallbackExecutionLines =
+      matchingMarketEvent ? null : buildExecutionFallbackLines(engineGame);
+    const executionLines = matchingMarketEvent ?? fallbackExecutionLines;
 
     const executionRecommendation =
-      matchingMarketEvent && executionInput
+      executionLines && executionInput
         ? chooseBestExecution(
-            matchingMarketEvent,
+            executionLines,
             executionInput.marketType,
             executionInput.preferredSide,
             executionInput.tier,
@@ -2145,6 +2370,13 @@ export async function GET(req: NextRequest) {
       resolvedFinalPick,
       engineGame
     );
+    const guardedAuditMetrics = buildAuditMetrics({
+      estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+      impliedProbability: guardedFinalPick.impliedProbability ?? null,
+      odds: guardedFinalPick.odds ?? null,
+      edge: guardedFinalPick.edge ?? null,
+      ev: guardedFinalPick.ev ?? null
+    });
     const effectiveExecutionRecommendation =
       guardedFinalPick.market === 'PASS'
         ? null
@@ -2160,6 +2392,26 @@ export async function GET(req: NextRequest) {
       guardedFinalPick,
       effectiveExecutionRecommendation
     );
+
+    logAnalyzeDebug({
+      gameId,
+      gameStartTime: engineGame.startTime,
+      boardKey: oddsBoardKey,
+      boardDateKey: formatUsageDateKey(
+        engineGame.startTime ? new Date(engineGame.startTime) : new Date()
+      ),
+      nowDateKey: formatUsageDateKey(new Date()),
+      userTimezone: USER_TIMEZONE,
+      marketsFound: executionLines?.lines.length ?? 0,
+      marketCandidates: marketCandidates.length,
+      hasMatchingMarketEvent: Boolean(matchingMarketEvent),
+      usedStoredOddsFallback:
+        !matchingMarketEvent && Boolean(fallbackExecutionLines),
+      oddsApiKeyPresent: Boolean(process.env.ODDS_API_KEY),
+      oddsFetchWarning,
+      finalStatus: finalDecision.status,
+      finalReason: finalDecision.reason
+    });
 
     const payload = buildAnalyzePayload(
       espnGame,
@@ -2229,6 +2481,12 @@ export async function GET(req: NextRequest) {
           impliedProbability: guardedFinalPick.impliedProbability ?? null,
           edge: guardedFinalPick.edge ?? null,
           ev: guardedFinalPick.ev ?? null,
+          pRaw: guardedAuditMetrics.p_raw,
+          pCalibrated: guardedAuditMetrics.p_calibrated,
+          edgeRaw: guardedAuditMetrics.edge_raw,
+          edgeCalibrated: guardedAuditMetrics.edge_calibrated,
+          evRaw: guardedAuditMetrics.ev_raw,
+          evCalibrated: guardedAuditMetrics.ev_calibrated,
           reason: pendingPickResetReason,
           altMarket1: guardedFinalPick.altMarket1 ?? null,
           altMarket2: guardedFinalPick.altMarket2 ?? null,
@@ -2278,6 +2536,12 @@ export async function GET(req: NextRequest) {
           impliedProbability: guardedFinalPick.impliedProbability ?? null,
           edge: guardedFinalPick.edge ?? null,
           ev: guardedFinalPick.ev ?? null,
+          pRaw: guardedAuditMetrics.p_raw,
+          pCalibrated: guardedAuditMetrics.p_calibrated,
+          edgeRaw: guardedAuditMetrics.edge_raw,
+          edgeCalibrated: guardedAuditMetrics.edge_calibrated,
+          evRaw: guardedAuditMetrics.ev_raw,
+          evCalibrated: guardedAuditMetrics.ev_calibrated,
           reason: guardedFinalPick.executionReason,
           altMarket1: guardedFinalPick.altMarket1 ?? null,
           altMarket2: guardedFinalPick.altMarket2 ?? null,

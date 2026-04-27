@@ -12,6 +12,7 @@ import {
   type ExecutionRecommendation
 } from '@/lib/choose-best-execution';
 import type { MarketLine } from '@/lib/market-lines';
+import { buildAuditMetrics } from '@/lib/audit-metrics';
 
 function roundOdds(value?: number | null): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -194,6 +195,13 @@ function buildScopedRecommendation(
 
 function parseSnapshotPickContext(payload: Record<string, unknown>) {
   const finalPick = payload.finalPick as Record<string, unknown> | undefined;
+  const auditMetrics = buildAuditMetrics({
+    estimatedProbability: safeNumber(finalPick?.estimatedProbability),
+    impliedProbability: safeNumber(finalPick?.impliedProbability),
+    odds: safeNumber(finalPick?.odds),
+    edge: safeNumber(finalPick?.edge),
+    ev: safeNumber(finalPick?.ev)
+  });
 
   return {
     market: safeString(finalPick?.market) || 'PASS',
@@ -205,6 +213,14 @@ function parseSnapshotPickContext(payload: Record<string, unknown>) {
     impliedProbability: safeNumber(finalPick?.impliedProbability),
     edge: safeNumber(finalPick?.edge),
     ev: safeNumber(finalPick?.ev),
+    pRaw: safeNumber(finalPick?.p_raw) ?? auditMetrics.p_raw,
+    pCalibrated: safeNumber(finalPick?.p_calibrated) ?? auditMetrics.p_calibrated,
+    edgeRaw: safeNumber(finalPick?.edge_raw) ?? auditMetrics.edge_raw,
+    edgeCalibrated:
+      safeNumber(finalPick?.edge_calibrated) ?? auditMetrics.edge_calibrated,
+    evRaw: safeNumber(finalPick?.ev_raw) ?? auditMetrics.ev_raw,
+    evCalibrated:
+      safeNumber(finalPick?.ev_calibrated) ?? auditMetrics.ev_calibrated,
     reason:
       safeString(finalPick?.executionReason) ||
       safeString(finalPick?.passReason) ||
@@ -307,20 +323,36 @@ export async function POST(req: NextRequest) {
     if (result.status === 'CONFIRMED') {
       const pickContext = payload
         ? parseSnapshotPickContext(payload)
-        : {
-            market: existingPick?.market ?? 'PASS',
-            selection: existingPick?.selection ?? 'NO BET',
-            line: existingPick?.line ?? null,
-            odds: existingPick?.odds ?? null,
-            confidence: existingPick?.confidence ?? 'PASS',
-            estimatedProbability: existingPick?.estimated_probability ?? null,
-            impliedProbability: existingPick?.implied_probability ?? null,
-            edge: existingPick?.edge ?? null,
-            ev: existingPick?.ev ?? null,
-            reason: existingPick?.reason ?? 'Execution confirmed from existing pick',
-            altMarket1: existingPick?.alt_market_1 ?? null,
-            altMarket2: existingPick?.alt_market_2 ?? null
-          };
+        : (() => {
+            const auditMetrics = buildAuditMetrics({
+              estimatedProbability: existingPick?.estimated_probability ?? null,
+              impliedProbability: existingPick?.implied_probability ?? null,
+              odds: existingPick?.odds ?? null,
+              edge: existingPick?.edge ?? null,
+              ev: existingPick?.ev ?? null
+            });
+
+            return {
+              market: existingPick?.market ?? 'PASS',
+              selection: existingPick?.selection ?? 'NO BET',
+              line: existingPick?.line ?? null,
+              odds: existingPick?.odds ?? null,
+              confidence: existingPick?.confidence ?? 'PASS',
+              estimatedProbability: existingPick?.estimated_probability ?? null,
+              impliedProbability: existingPick?.implied_probability ?? null,
+              edge: existingPick?.edge ?? null,
+              ev: existingPick?.ev ?? null,
+              pRaw: auditMetrics.p_raw,
+              pCalibrated: auditMetrics.p_calibrated,
+              edgeRaw: auditMetrics.edge_raw,
+              edgeCalibrated: auditMetrics.edge_calibrated,
+              evRaw: auditMetrics.ev_raw,
+              evCalibrated: auditMetrics.ev_calibrated,
+              reason: existingPick?.reason ?? 'Execution confirmed from existing pick',
+              altMarket1: existingPick?.alt_market_1 ?? null,
+              altMarket2: existingPick?.alt_market_2 ?? null
+            };
+          })();
 
       await upsertPickRecord({
         gameId,
@@ -344,6 +376,12 @@ export async function POST(req: NextRequest) {
         impliedProbability: roundMetric(pickContext.impliedProbability),
         edge: roundMetric(pickContext.edge),
         ev: roundMetric(pickContext.ev),
+        pRaw: roundMetric(pickContext.pRaw),
+        pCalibrated: roundMetric(pickContext.pCalibrated),
+        edgeRaw: roundMetric(pickContext.edgeRaw),
+        edgeCalibrated: roundMetric(pickContext.edgeCalibrated),
+        evRaw: roundMetric(pickContext.evRaw),
+        evCalibrated: roundMetric(pickContext.evCalibrated),
 
         reason: pickContext.reason,
         altMarket1: pickContext.altMarket1,

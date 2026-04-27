@@ -250,6 +250,12 @@ export type PickRecordUpsertInput = {
   impliedProbability?: number | null;
   edge?: number | null;
   ev?: number | null;
+  pRaw?: number | null;
+  pCalibrated?: number | null;
+  edgeRaw?: number | null;
+  edgeCalibrated?: number | null;
+  evRaw?: number | null;
+  evCalibrated?: number | null;
 
   reason: string;
   altMarket1?: string | null;
@@ -285,6 +291,12 @@ export type PickRow = {
   implied_probability: number | null;
   edge: number | null;
   ev: number | null;
+  p_raw?: number | null;
+  p_calibrated?: number | null;
+  edge_raw?: number | null;
+  edge_calibrated?: number | null;
+  ev_raw?: number | null;
+  ev_calibrated?: number | null;
 
   reason: string;
   alt_market_1: string | null;
@@ -754,50 +766,79 @@ export async function getPregameSnapshotsForGames(
 export async function upsertPickRecord(
   input: PickRecordUpsertInput
 ): Promise<PickRow> {
-  const { data, error } = await supabase
-    .from('picks')
-    .upsert(
-      {
-        game_day: input.gameDay ?? null,
-        game_id: input.gameId,
-        snapshot_id: input.snapshotId ?? null,
-        snapshot_stage: input.snapshotStage ?? null,
-        sport: input.sport,
+  const basePayload = {
+    game_day: input.gameDay ?? null,
+    game_id: input.gameId,
+    snapshot_id: input.snapshotId ?? null,
+    snapshot_stage: input.snapshotStage ?? null,
+    sport: input.sport,
 
-        market: input.market,
-        selection: input.selection,
-        line: input.line ?? null,
-        odds: input.odds ?? null,
+    market: input.market,
+    selection: input.selection,
+    line: input.line ?? null,
+    odds: input.odds ?? null,
 
-        confidence: input.confidence,
-        estimated_probability: input.estimatedProbability ?? null,
-        implied_probability: input.impliedProbability ?? null,
-        edge: input.edge ?? null,
-        ev: input.ev ?? null,
+    confidence: input.confidence,
+    estimated_probability: input.estimatedProbability ?? null,
+    implied_probability: input.impliedProbability ?? null,
+    edge: input.edge ?? null,
+    ev: input.ev ?? null,
 
-        reason: input.reason,
-        alt_market_1: input.altMarket1 ?? null,
-        alt_market_2: input.altMarket2 ?? null,
+    reason: input.reason,
+    alt_market_1: input.altMarket1 ?? null,
+    alt_market_2: input.altMarket2 ?? null,
 
-        execution_market: input.executionMarket ?? null,
-        execution_selection: input.executionSelection ?? null,
-        execution_line: input.executionLine ?? null,
-        execution_odds: input.executionOdds ?? null,
-        execution_side: input.executionSide ?? null,
-        execution_reason: input.executionReason ?? null,
+    execution_market: input.executionMarket ?? null,
+    execution_selection: input.executionSelection ?? null,
+    execution_line: input.executionLine ?? null,
+    execution_odds: input.executionOdds ?? null,
+    execution_side: input.executionSide ?? null,
+    execution_reason: input.executionReason ?? null,
 
-        status: input.status ?? 'pending',
-        result: input.result ?? null,
-        profit_units: input.profitUnits ?? null,
+    status: input.status ?? 'pending',
+    result: input.result ?? null,
+    profit_units: input.profitUnits ?? null,
 
-        updated_at: new Date().toISOString()
-      },
-      {
+    updated_at: new Date().toISOString()
+  };
+
+  const auditPayload = {
+    ...basePayload,
+    p_raw: input.pRaw ?? null,
+    p_calibrated: input.pCalibrated ?? null,
+    edge_raw: input.edgeRaw ?? null,
+    edge_calibrated: input.edgeCalibrated ?? null,
+    ev_raw: input.evRaw ?? null,
+    ev_calibrated: input.evCalibrated ?? null
+  };
+
+  const hasAuditMetrics =
+    input.pRaw !== undefined ||
+    input.pCalibrated !== undefined ||
+    input.edgeRaw !== undefined ||
+    input.edgeCalibrated !== undefined ||
+    input.evRaw !== undefined ||
+    input.evCalibrated !== undefined;
+
+  const runUpsert = async (payload: typeof basePayload | typeof auditPayload) =>
+    supabase
+      .from('picks')
+      .upsert(payload, {
         onConflict: 'game_id'
-      }
-    )
-    .select(PICK_COLUMNS)
-    .single();
+      })
+      .select(PICK_COLUMNS)
+      .single();
+
+  let { data, error } = await runUpsert(hasAuditMetrics ? auditPayload : basePayload);
+
+  const errorMessage = error?.message ?? '';
+  const isMissingAuditColumnError =
+    /p_raw|p_calibrated|edge_raw|edge_calibrated|ev_raw|ev_calibrated/i.test(errorMessage) &&
+    /column|schema cache|Could not find/i.test(errorMessage);
+
+  if (error && hasAuditMetrics && isMissingAuditColumnError) {
+    ({ data, error } = await runUpsert(basePayload));
+  }
 
   if (error) {
     throw new Error(`Failed to save pick record: ${error.message}`);
