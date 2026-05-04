@@ -5,10 +5,14 @@ import {
   getPregameSnapshotsByIds,
   getOddsBoardCache,
   listConfirmedPicks,
+  listCombiPicks,
+  buildCombiStatsSummary,
   getPremiumDailyLock,
   createPremiumDailyLock,
   closePremiumDailyLock,
-  supabase
+  supabase,
+  type CombiPickRow,
+  type CombiStatsSummary
 } from '@/lib/db';
 import { resolveMatchupLabel } from '@/lib/matchup-label';
 import {
@@ -19,6 +23,7 @@ import {
 } from '@/lib/runtime-config';
 import { getSlateDayKey } from '@/lib/slate-day';
 import { buildVercelBudgetSummary } from '@/lib/vercel-ops';
+import { buildStakingSummaries, type StakingSummaries } from '@/lib/staking-summaries';
 
 const SUPABASE_FREE_DB_LIMIT_MB = 500;
 const ODDS_MONTHLY_LIMIT = 2500;
@@ -205,12 +210,14 @@ type DisplaySlice = {
   startDate: string | null;
   endDate: string | null;
   summary: SliceSummary;
+  stakeSummaries: StakingSummaries;
   byMarket: BucketSummary[];
   byConfidence: BucketSummary[];
   byEdgeRange: BucketSummary[];
   trend: TrendPoint[];
   premium: SlicePremiumView;
   daily: DailySummaryItem[];
+  combiSummary: CombiStatsSummary;
 };
 
 type LivePeriodMeta = {
@@ -966,6 +973,7 @@ function buildDailySummary(
 
 function buildDisplaySlice(
   picks: StatsPickRecord[],
+  combiRows: CombiPickRow[],
   options: {
     key: string;
     label: string;
@@ -976,7 +984,31 @@ function buildDisplaySlice(
   }
 ): DisplaySlice {
   const summary = buildSliceSummary(picks);
+  const stakeSummaries = buildStakingSummaries(
+    picks.map((pick) => ({
+      confidence: pick.confidence,
+      status: pick.status,
+      profit_units: pick.profit_units,
+      execution_odds: pick.execution_odds,
+      odds: pick.odds
+    }))
+  );
   const buckets = buildSliceBuckets(picks);
+  const combiRowsInSlice = combiRows.filter((row) => {
+    const day = String(row.game_day ?? '');
+    if (!day) return false;
+
+    if (options.mode === 'testing') {
+      return day < LIVE_STATS_CUTOFF_DATE_KEY;
+    }
+
+    return Boolean(
+      options.startDate &&
+      options.endDate &&
+      day >= options.startDate &&
+      day <= options.endDate
+    );
+  });
   const premiumAudit = buildSolidPickAuditRange(picks, null);
   const rankAudits: PremiumRankHistory[] = ([1, 2, 3] as const).map((rank) => {
     const audit = buildSolidPickAuditRange(picks, null, rank);
@@ -998,6 +1030,7 @@ function buildDisplaySlice(
     startDate: options.startDate,
     endDate: options.endDate,
     summary,
+    stakeSummaries,
     byMarket: buckets.byMarket,
     byConfidence: buckets.byConfidence,
     byEdgeRange: buckets.byEdgeRange,
@@ -1014,7 +1047,8 @@ function buildDisplaySlice(
       betterPickPostLock: options.currentPremiumContext?.betterPickPostLock ?? false,
       betterPick: options.currentPremiumContext?.betterPick ?? null
     },
-    daily: buildDailySummary(picks, premiumAudit, options.currentPremiumContext)
+    daily: buildDailySummary(picks, premiumAudit, options.currentPremiumContext),
+    combiSummary: buildCombiStatsSummary(combiRowsInSlice)
   };
 }
 
@@ -1164,12 +1198,13 @@ async function buildOddsUsageSummary() {
 export async function GET(req: NextRequest) {
   try {
 const originHint = getOriginHint(req.headers);
-const [confirmedPicks, summaryViewResult] = await Promise.all([
+const [confirmedPicks, summaryViewResult, combiRows] = await Promise.all([
   listConfirmedPicks(),
   supabase
     .from('pick_stats_summary')
     .select('*')
-    .single()
+    .single(),
+  listCombiPicks(200)
 ]);
 
     const summaryDb = summaryViewResult.data;
@@ -1749,7 +1784,7 @@ const rawTodayCandidates = pickRecords
       betterPick
     };
 
-    const testingDisplay = buildDisplaySlice(testingPicks, {
+    const testingDisplay = buildDisplaySlice(testingPicks, combiRows, {
       key: 'testing',
       label: 'Testing',
       mode: 'testing',
@@ -1794,7 +1829,7 @@ const rawTodayCandidates = pickRecords
 
       return {
         ...period,
-        ...buildDisplaySlice(periodPicks, {
+        ...buildDisplaySlice(periodPicks, combiRows, {
           key: period.key,
           label: period.label,
           mode: 'live',

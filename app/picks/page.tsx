@@ -3,8 +3,9 @@
 import { memo, startTransition, useEffect, useMemo, useState, useCallback } from 'react';
 import { ManualSettlePopover } from '@/app/_components/manual-settle-popover';
 import { settlePickManually, type ManualSettleStatus } from '@/lib/manual-settle-client';
-import { LIVE_STATS_CUTOFF_DATE_KEY } from '@/lib/runtime-config';
+import { LIVE_STATS_CUTOFF_DATE_KEY, formatDateKeyForTimezone } from '@/lib/runtime-config';
 import { getSlateDayKey } from '@/lib/slate-day';
+import { buildStakingSummaries } from '@/lib/staking-summaries';
 
 type PickItem = {
   id: string;
@@ -33,6 +34,15 @@ type PicksResponse = {
 };
 
 type PicksMode = 'live' | 'testing';
+
+type LivePeriodMeta = {
+  key: string;
+  label: string;
+  startDate: string;
+  endDate: string;
+  isCurrent: boolean;
+  hasData: boolean;
+};
 
 type GroupedDay = {
   key: string;
@@ -141,6 +151,64 @@ function groupByDate(picks: PickItem[]) {
 
 function resolveDefaultDateKey(keys: string[]) {
   return keys[0] ?? '';
+}
+
+function parseDateKey(dateKey: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null;
+  const date = new Date(`${dateKey}T12:00:00.000Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDaysToDateKey(dateKey: string, days: number): string {
+  const date = parseDateKey(dateKey);
+  if (!date) return dateKey;
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function getSundayOnOrAfterDateKey(dateKey: string): string {
+  const date = parseDateKey(dateKey);
+  if (!date) return dateKey;
+  const daysUntilSunday = (7 - date.getUTCDay()) % 7;
+  return addDaysToDateKey(dateKey, daysUntilSunday);
+}
+
+function formatPeriodLabel(startDate: string, endDate: string): string {
+  return `${startDate.slice(8)}-${endDate.slice(8)}`;
+}
+
+function buildLivePeriods(picks: PickItem[], todayDateKey: string): LivePeriodMeta[] {
+  const liveDateKeys = picks
+    .map((pick) => getPickDateKey(pick))
+    .filter((dateKey): dateKey is string => Boolean(dateKey && dateKey >= LIVE_STATS_CUTOFF_DATE_KEY));
+  const maxLiveDateKey = [...liveDateKeys].sort((left, right) => left.localeCompare(right)).at(-1) ?? null;
+  const throughDateKey =
+    todayDateKey >= LIVE_STATS_CUTOFF_DATE_KEY
+      ? maxLiveDateKey && maxLiveDateKey > todayDateKey
+        ? maxLiveDateKey
+        : todayDateKey
+      : maxLiveDateKey;
+
+  if (!throughDateKey) return [];
+
+  const periods: LivePeriodMeta[] = [];
+  let startDate = LIVE_STATS_CUTOFF_DATE_KEY;
+  let endDate = getSundayOnOrAfterDateKey(LIVE_STATS_CUTOFF_DATE_KEY);
+
+  while (startDate <= throughDateKey) {
+    periods.push({
+      key: `${startDate}:${endDate}`,
+      label: formatPeriodLabel(startDate, endDate),
+      startDate,
+      endDate,
+      isCurrent: todayDateKey >= startDate && todayDateKey <= endDate,
+      hasData: liveDateKeys.some((dateKey) => dateKey >= startDate && dateKey <= endDate)
+    });
+    startDate = addDaysToDateKey(endDate, 1);
+    endDate = addDaysToDateKey(startDate, 6);
+  }
+
+  return periods;
 }
 
 function PicksProgressBar() {
@@ -272,6 +340,7 @@ export default function PicksPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<PicksMode>('live');
+  const [selectedLivePeriodKey, setSelectedLivePeriodKey] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState('');
   const [openPickId, setOpenPickId] = useState<string | null>(null);
   const [settlingPickId, setSettlingPickId] = useState<string | null>(null);
@@ -336,43 +405,71 @@ useEffect(() => {
     return { live, testing };
   }, [picks]);
 
-  const activePicks = mode === 'live' ? segmented.live : segmented.testing;
+  const todayDateKey = useMemo(() => formatDateKeyForTimezone(0, { dashed: true }), []);
+  const livePeriods = useMemo(() => buildLivePeriods(picks, todayDateKey), [picks, todayDateKey]);
+
+  useEffect(() => {
+    const activeKey =
+      livePeriods.find((period) => period.isCurrent)?.key ??
+      livePeriods.at(-1)?.key ??
+      null;
+    if (!activeKey) return;
+
+    setSelectedLivePeriodKey((current) => {
+      if (current && livePeriods.some((period) => period.key === current)) return current;
+      return activeKey;
+    });
+  }, [livePeriods]);
+
+  const selectedLivePeriod = useMemo(
+    () =>
+      livePeriods.find((period) => period.key === selectedLivePeriodKey) ??
+      livePeriods.find((period) => period.isCurrent) ??
+      livePeriods.at(-1) ??
+      null,
+    [livePeriods, selectedLivePeriodKey]
+  );
+
+  const activePicks = useMemo(() => {
+    if (mode === 'testing') return segmented.testing;
+    if (!selectedLivePeriod) return segmented.live;
+
+    return segmented.live.filter((pick) => {
+      const dateKey = getPickDateKey(pick);
+      return Boolean(
+        dateKey &&
+        dateKey >= selectedLivePeriod.startDate &&
+        dateKey <= selectedLivePeriod.endDate
+      );
+    });
+  }, [mode, segmented.live, segmented.testing, selectedLivePeriod]);
 
   const summary = useMemo(() => {
-    let pendingCount = 0;
-    let settledCount = 0;
-    let wonCount = 0;
-    let lostCount = 0;
-    let profitUnits = 0;
-
-    for (const pick of activePicks) {
-      if (pick.status === 'pending') {
-        pendingCount += 1;
-      } else {
-        settledCount += 1;
-      }
-
-      if (pick.status === 'won') {
-        wonCount += 1;
-      }
-
-      if (pick.status === 'lost') {
-        lostCount += 1;
-      }
-
-      if (typeof pick.profitUnits === 'number' && Number.isFinite(pick.profitUnits)) {
-        profitUnits += pick.profitUnits;
-      }
-    }
-
-    const gradedCount = wonCount + lostCount;
+    const stakingSummaries = buildStakingSummaries(
+      activePicks.map((pick) => ({
+        confidence: pick.confidence,
+        status: pick.status,
+        profit_units: pick.profitUnits,
+        execution_odds: pick.executionOdds,
+        odds: pick.modelOdds
+      }))
+    );
+    const main = stakingSummaries.main_system_summary;
+    const flat = stakingSummaries.all_flat_summary;
+    const optionalC = stakingSummaries.optional_c_summary;
 
     return {
-      totalCount: activePicks.length,
-      pendingCount,
-      settledCount,
-      profitUnits,
-      winRate: gradedCount > 0 ? (wonCount / gradedCount) * 100 : null
+      totalCount: main.total_picks,
+      pendingCount: main.pending,
+      settledCount: main.settled_picks,
+      profitUnits: main.profit_units,
+      winRate: main.win_rate !== null ? main.win_rate * 100 : null,
+      flatProfitUnits: flat.profit_units,
+      flatTotalCount: flat.total_picks,
+      optionalCProfitUnits: optionalC.profit_units,
+      optionalCTotalCount: optionalC.total_picks,
+      weightedProfitUnits: stakingSummaries.weighted_summary.profit_units,
+      weightedRoi: stakingSummaries.weighted_summary.roi
     };
   }, [activePicks]);
 
@@ -433,21 +530,32 @@ useEffect(() => {
           <div className="flex min-h-[168px] flex-col justify-between gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
-                {[
-                  { value: 'live', label: 'Live' },
-                  { value: 'testing', label: 'Testing' }
-                ].map((item) => (
+                <button
+                  type="button"
+                  onClick={() => setMode('testing')}
+                  className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
+                    mode === 'testing'
+                      ? 'bg-[var(--surface-navy)] text-white'
+                      : 'border border-[var(--line-soft)] bg-white text-[var(--ink-soft)] hover:text-[var(--ink-strong)]'
+                  }`}
+                >
+                  Testing
+                </button>
+                {livePeriods.map((period) => (
                   <button
-                    key={item.value}
+                    key={period.key}
                     type="button"
-                    onClick={() => setMode(item.value as PicksMode)}
+                    onClick={() => {
+                      setMode('live');
+                      setSelectedLivePeriodKey(period.key);
+                    }}
                     className={`rounded-full px-3 py-1.5 text-sm font-semibold transition ${
-                      mode === item.value
+                      mode === 'live' && selectedLivePeriod?.key === period.key
                         ? 'bg-[var(--surface-navy)] text-white'
                         : 'border border-[var(--line-soft)] bg-white text-[var(--ink-soft)] hover:text-[var(--ink-strong)]'
                     }`}
                   >
-                    {item.label}
+                    Live {period.label}
                   </button>
                 ))}
               </div>
@@ -462,7 +570,7 @@ useEffect(() => {
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
               <div className="navy-panel flex min-h-[78px] flex-col justify-between rounded-[0.95rem] px-3 py-2 text-white">
-                <div className="text-[9px] uppercase tracking-[0.18em] text-white/60">Total picks</div>
+                <div className="text-[9px] uppercase tracking-[0.18em] text-white/60">Sistema A/B</div>
                 <div className="text-[1.28rem] font-semibold">{summary.totalCount}</div>
               </div>
               <div className="flex min-h-[78px] flex-col justify-between rounded-[0.95rem] border border-[var(--line-soft)] bg-white px-3 py-2">
@@ -482,6 +590,25 @@ useEffect(() => {
                 <div className="text-[1.28rem] font-semibold text-[var(--ink-strong)]">
                   {summary.winRate === null ? '-' : `${summary.winRate.toFixed(1)}%`}
                 </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs lg:grid-cols-4">
+              <div className="rounded-[0.8rem] border border-[var(--line-soft)] bg-white/80 px-3 py-2">
+                <div className="text-[9px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Weighted</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{formatUnits(summary.weightedProfitUnits)} · ROI {summary.weightedRoi === null ? '-' : `${(summary.weightedRoi * 100).toFixed(1)}%`}</div>
+              </div>
+              <div className="rounded-[0.8rem] border border-[var(--line-soft)] bg-white/80 px-3 py-2">
+                <div className="text-[9px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Flat A/B/C</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{summary.flatTotalCount} picks · {formatUnits(summary.flatProfitUnits)}</div>
+              </div>
+              <div className="rounded-[0.8rem] border border-[var(--line-soft)] bg-white/80 px-3 py-2">
+                <div className="text-[9px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Optional C</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{summary.optionalCTotalCount} picks · {formatUnits(summary.optionalCProfitUnits)}</div>
+              </div>
+              <div className="rounded-[0.8rem] border border-[var(--line-soft)] bg-white/80 px-3 py-2">
+                <div className="text-[9px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Rango activo</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{mode === 'live' ? selectedLivePeriod?.label ?? 'Live' : 'Testing'}</div>
               </div>
             </div>
           </div>

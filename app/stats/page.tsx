@@ -27,6 +27,39 @@ type BucketSummary = {
   avgEv: number | null;
 };
 
+type StakeSummary = {
+  total_picks: number;
+  staked_picks: number;
+  settled_picks: number;
+  wins: number;
+  losses: number;
+  voids: number;
+  pending: number;
+  staked_units: number;
+  profit_units: number;
+  win_rate: number | null;
+  roi: number | null;
+};
+
+type StakeSummaries = {
+  all_flat_summary: StakeSummary;
+  main_system_summary: StakeSummary;
+  optional_c_summary: StakeSummary;
+  weighted_summary: StakeSummary;
+  conservative_summary: StakeSummary;
+};
+
+type CombiStatsSummary = {
+  total: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  profit_units: number;
+  roi: number | null;
+  avg_combined_odds: number | null;
+};
+
 type RecentItem = {
   id: string;
   gameId: string;
@@ -206,12 +239,14 @@ type SegmentedStatsSlice = {
     avgEdge: number | null;
     avgEv: number | null;
   };
+  stakeSummaries: StakeSummaries;
   byMarket: BucketSummary[];
   byConfidence: BucketSummary[];
   byEdgeRange: BucketSummary[];
   trend: TrendPoint[];
   premium: SegmentedPremiumView;
   daily: DailySummaryItem[];
+  combiSummary: CombiStatsSummary;
 };
 
 type LiveStatsView = SegmentedStatsSlice & {
@@ -930,6 +965,12 @@ const selectedView = useMemo<SegmentedStatsSlice | LiveStatsView | null>(() => {
 }, [display?.testing, selectedDataMode, selectedLiveView]);
 
 const summary = selectedView?.summary ?? null;
+const stakeSummaries = selectedView?.stakeSummaries ?? null;
+const mainSystemSummary = stakeSummaries?.main_system_summary ?? null;
+const allFlatSummary = stakeSummaries?.all_flat_summary ?? null;
+const optionalCSummary = stakeSummaries?.optional_c_summary ?? null;
+const weightedSummary = stakeSummaries?.weighted_summary ?? null;
+const combiSummary = selectedView?.combiSummary ?? null;
 const trend = selectedView?.trend ?? [];
 const byConfidence = selectedView?.byConfidence ?? [];
 const byMarket = selectedView?.byMarket ?? [];
@@ -1115,28 +1156,53 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
             </div>
             </div>
 
-            {summary && (
+            {(mainSystemSummary ?? summary) && (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
               <div className="navy-panel rounded-[1.25rem] p-3 text-white">
-                <div className="text-[10px] uppercase tracking-[0.22em] text-white/60">Total picks</div>
-                <div className="mt-1 text-[1.5rem] font-semibold">{summary.totalPicks}</div>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-white/60">Sistema A/B</div>
+                <div className="mt-1 text-[1.5rem] font-semibold">{mainSystemSummary?.total_picks ?? summary?.totalPicks ?? 0}</div>
               </div>
               <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Win rate</div>
-                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatRate(summary.winRate)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatRate(mainSystemSummary?.win_rate ?? summary?.winRate)}</div>
               </div>
               <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Profit</div>
-                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatUnits(summary.totalProfitUnits)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatUnits(mainSystemSummary?.profit_units ?? summary?.totalProfitUnits)}</div>
               </div>
               <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">ROI</div>
-                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatMetric(summary.roi)}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{formatRate(mainSystemSummary?.roi ?? summary?.roi)}</div>
               </div>
               <div className="rounded-[1.25rem] border border-[var(--line-soft)] bg-white p-3">
                 <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Pendientes</div>
-                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{summary.pendingCount}</div>
+                <div className="mt-1 text-[1.5rem] font-semibold text-[var(--ink-strong)]">{mainSystemSummary?.pending ?? summary?.pendingCount ?? 0}</div>
               </div>
+              </div>
+            )}
+            {stakeSummaries && (
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                {[
+                  { label: 'Weighted A/B/C', item: weightedSummary, detail: 'A 1u · B 0.5u · C 0.25u' },
+                  { label: 'Flat total', item: allFlatSummary, detail: 'A/B/C a 1u' },
+                  { label: 'Optional C', item: optionalCSummary, detail: 'Riesgo separado' },
+                  { label: 'Combi Lab', item: combiSummary, detail: 'Solo combinadas' }
+                ].map(({ label, item, detail }) => (
+                  <div key={label} className="rounded-[1rem] border border-[var(--line-soft)] bg-white/80 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">{label}</div>
+                      <div className="text-[11px] text-[var(--ink-soft)]">{detail}</div>
+                    </div>
+                    <div className="mt-1 flex items-baseline justify-between gap-3">
+                      <div className="text-[1.05rem] font-semibold text-[var(--ink-strong)]">
+                        {formatUnits(item && 'profit_units' in item ? item.profit_units : null)}
+                      </div>
+                      <div className="text-xs text-[var(--ink-soft)]">
+                        WR {formatRate(item && 'win_rate' in item ? item.win_rate : null)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

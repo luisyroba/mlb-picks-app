@@ -925,14 +925,14 @@ export async function listConfirmedPicks(): Promise<PickRow[]> {
   return listPicks();
 }
 
-export async function listConfirmedPicksForLedger(): Promise<PickLedgerRow[]> {
+export async function listConfirmedPicksForLedger(limit = 300): Promise<PickLedgerRow[]> {
   const { data, error } = await supabase
     .from('picks')
     .select(PICK_LEDGER_COLUMNS)
     .eq('sport', 'MLB')
     .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
     .order('updated_at', { ascending: false })
-    .limit(60);
+    .limit(limit);
 
   if (error) {
     throw new Error(`Failed to fetch ledger picks: ${error.message}`);
@@ -1179,4 +1179,540 @@ export async function listOddsBoardCachesByPrefix(
   : [];
 
 return rows;
+}
+
+// ─── Combi Picks ────────────────────────────────────────────────────────────
+
+const COMBI_PICK_COLUMNS = [
+  'id',
+  'game_day',
+  'status',
+  'created_at',
+  'updated_at',
+  'leg_1_game_id',
+  'leg_1_market',
+  'leg_1_selection',
+  'leg_1_line',
+  'leg_1_api_odds',
+  'leg_1_real_odds',
+  'leg_1_status',
+  'leg_1_result',
+  'leg_1_home_team',
+  'leg_1_away_team',
+  'leg_2_game_id',
+  'leg_2_market',
+  'leg_2_selection',
+  'leg_2_line',
+  'leg_2_api_odds',
+  'leg_2_real_odds',
+  'leg_2_status',
+  'leg_2_result',
+  'leg_2_home_team',
+  'leg_2_away_team',
+  'combined_api_odds',
+  'combined_real_odds',
+  'profit_units',
+  'metadata'
+].join(',');
+
+export type CombiPickRow = {
+  id: string;
+  game_day: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+
+  leg_1_game_id: string | null;
+  leg_1_market: string | null;
+  leg_1_selection: string | null;
+  leg_1_line: number | null;
+  leg_1_api_odds: number | null;
+  leg_1_real_odds: number | null;
+  leg_1_status: string;
+  leg_1_result: string | null;
+  leg_1_home_team: string | null;
+  leg_1_away_team: string | null;
+
+  leg_2_game_id: string | null;
+  leg_2_market: string | null;
+  leg_2_selection: string | null;
+  leg_2_line: number | null;
+  leg_2_api_odds: number | null;
+  leg_2_real_odds: number | null;
+  leg_2_status: string;
+  leg_2_result: string | null;
+  leg_2_home_team: string | null;
+  leg_2_away_team: string | null;
+
+  combined_api_odds: number | null;
+  combined_real_odds: number | null;
+  profit_units: number | null;
+
+  metadata: Record<string, unknown> | null;
+};
+
+export type CombiPickInsert = {
+  gameDay: string;
+  leg1GameId: string;
+  leg1Market: string;
+  leg1Selection: string;
+  leg1Line: number | null;
+  leg1ApiOdds: number;
+  leg1RealOdds?: number | null;
+  leg1HomeTeam: string | null;
+  leg1AwayTeam: string | null;
+  leg2GameId: string;
+  leg2Market: string;
+  leg2Selection: string;
+  leg2Line: number | null;
+  leg2ApiOdds: number;
+  leg2RealOdds?: number | null;
+  leg2HomeTeam: string | null;
+  leg2AwayTeam: string | null;
+  combinedApiOdds: number;
+  combinedRealOdds?: number | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type CombiStatsSummary = {
+  total: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  profit_units: number;
+  roi: number | null;
+  avg_combined_odds: number | null;
+};
+
+export function buildCombiStatsSummary(rows: CombiPickRow[]): CombiStatsSummary {
+  let wins = 0;
+  let losses = 0;
+  let profitUnitsTotal = 0;
+  let oddsTotal = 0;
+  let oddsCount = 0;
+
+  for (const row of rows) {
+    if (row.status === 'won') wins += 1;
+    if (row.status === 'lost') losses += 1;
+
+    if (typeof row.profit_units === 'number' && Number.isFinite(row.profit_units)) {
+      profitUnitsTotal += row.profit_units;
+    }
+
+    const combinedOdds = row.combined_real_odds ?? row.combined_api_odds;
+    if (typeof combinedOdds === 'number' && Number.isFinite(combinedOdds)) {
+      oddsTotal += combinedOdds;
+      oddsCount += 1;
+    }
+  }
+
+  const settled = wins + losses;
+
+  return {
+    total: rows.length,
+    settled,
+    wins,
+    losses,
+    win_rate: settled > 0 ? Number((wins / settled).toFixed(4)) : null,
+    profit_units: Number(profitUnitsTotal.toFixed(3)),
+    roi: settled > 0 ? Number((profitUnitsTotal / settled).toFixed(4)) : null,
+    avg_combined_odds: oddsCount > 0 ? Number((oddsTotal / oddsCount).toFixed(3)) : null
+  };
+}
+
+const COMBI_SNAPSHOT_COLUMNS = [
+  'game_id',
+  'snapshot_stage',
+  'start_time',
+  'payload'
+].join(',');
+
+export type CombiSnapshotLight = {
+  game_id: string;
+  snapshot_stage: string;
+  start_time: string | null;
+  payload: Record<string, unknown>;
+};
+
+export async function getCombiPickForDay(
+  gameDay: string
+): Promise<CombiPickRow | null> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .select(COMBI_PICK_COLUMNS)
+    .eq('game_day', gameDay)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to fetch combi pick for day ${gameDay}: ${error.message}`);
+  }
+
+  if (!data) return null;
+
+  return assertSingleRow<CombiPickRow>(data, 'combi pick');
+}
+
+export async function saveCombiPick(
+  input: CombiPickInsert
+): Promise<CombiPickRow> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .insert({
+      game_day: input.gameDay,
+      status: 'pending',
+      leg_1_game_id: input.leg1GameId,
+      leg_1_market: input.leg1Market,
+      leg_1_selection: input.leg1Selection,
+      leg_1_line: input.leg1Line,
+      leg_1_api_odds: input.leg1ApiOdds,
+      leg_1_real_odds: input.leg1RealOdds ?? null,
+      leg_1_status: 'pending',
+      leg_1_result: null,
+      leg_1_home_team: input.leg1HomeTeam,
+      leg_1_away_team: input.leg1AwayTeam,
+      leg_2_game_id: input.leg2GameId,
+      leg_2_market: input.leg2Market,
+      leg_2_selection: input.leg2Selection,
+      leg_2_line: input.leg2Line,
+      leg_2_api_odds: input.leg2ApiOdds,
+      leg_2_real_odds: input.leg2RealOdds ?? null,
+      leg_2_status: 'pending',
+      leg_2_result: null,
+      leg_2_home_team: input.leg2HomeTeam,
+      leg_2_away_team: input.leg2AwayTeam,
+      combined_api_odds: input.combinedApiOdds,
+      combined_real_odds: input.combinedRealOdds ?? null,
+      profit_units: null,
+      metadata: input.metadata ?? null,
+      updated_at: new Date().toISOString()
+    })
+    .select(COMBI_PICK_COLUMNS)
+    .single();
+
+  if (error) {
+    const isDuplicate =
+      error.code === '23505' ||
+      error.message?.toLowerCase().includes('duplicate') ||
+      error.message?.toLowerCase().includes('unique');
+
+    if (isDuplicate) {
+      const existing = await getCombiPickForDay(input.gameDay);
+      if (existing) return existing;
+    }
+
+    throw new Error(`Failed to save combi pick: ${error.message}`);
+  }
+
+  return assertSingleRow<CombiPickRow>(data, 'combi pick');
+}
+
+export async function updateCombiPickOdds(
+  id: string,
+  leg1RealOdds: number,
+  leg2RealOdds: number
+): Promise<CombiPickRow> {
+  const combinedRealOdds = Number((leg1RealOdds * leg2RealOdds).toFixed(3));
+
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .update({
+      leg_1_real_odds: leg1RealOdds,
+      leg_2_real_odds: leg2RealOdds,
+      combined_real_odds: combinedRealOdds,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .select(COMBI_PICK_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update combi odds: ${error.message}`);
+  }
+
+  return assertSingleRow<CombiPickRow>(data, 'combi pick');
+}
+
+export async function replacePendingCombiPick(
+  id: string,
+  input: CombiPickInsert
+): Promise<CombiPickRow> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .update({
+      game_day: input.gameDay,
+      status: 'pending',
+      leg_1_game_id: input.leg1GameId,
+      leg_1_market: input.leg1Market,
+      leg_1_selection: input.leg1Selection,
+      leg_1_line: input.leg1Line,
+      leg_1_api_odds: input.leg1ApiOdds,
+      leg_1_real_odds: input.leg1RealOdds ?? null,
+      leg_1_status: 'pending',
+      leg_1_result: null,
+      leg_1_home_team: input.leg1HomeTeam,
+      leg_1_away_team: input.leg1AwayTeam,
+      leg_2_game_id: input.leg2GameId,
+      leg_2_market: input.leg2Market,
+      leg_2_selection: input.leg2Selection,
+      leg_2_line: input.leg2Line,
+      leg_2_api_odds: input.leg2ApiOdds,
+      leg_2_real_odds: input.leg2RealOdds ?? null,
+      leg_2_status: 'pending',
+      leg_2_result: null,
+      leg_2_home_team: input.leg2HomeTeam,
+      leg_2_away_team: input.leg2AwayTeam,
+      combined_api_odds: input.combinedApiOdds,
+      combined_real_odds: input.combinedRealOdds ?? null,
+      profit_units: null,
+      metadata: input.metadata ?? null,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .eq('status', 'pending')
+    .select(COMBI_PICK_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to replace pending combi pick: ${error.message}`);
+  }
+
+  return assertSingleRow<CombiPickRow>(data, 'combi pick');
+}
+
+export async function discardPendingCombiPick(
+  id: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('combi_picks')
+    .delete()
+    .eq('id', id)
+    .eq('status', 'pending');
+
+  if (error) {
+    throw new Error(`Failed to discard pending combi pick: ${error.message}`);
+  }
+}
+
+export async function settleCombiLeg(
+  id: string,
+  leg: 1 | 2,
+  status: 'won' | 'lost',
+  result?: string | null
+): Promise<CombiPickRow> {
+  const legField = leg === 1 ? 'leg_1_status' : 'leg_2_status';
+  const resultField = leg === 1 ? 'leg_1_result' : 'leg_2_result';
+
+  const { data: current, error: fetchError } = await supabase
+    .from('combi_picks')
+    .select(COMBI_PICK_COLUMNS)
+    .eq('id', id)
+    .single();
+
+  if (fetchError || !current) {
+    throw new Error(`Failed to fetch combi pick for settle: ${fetchError?.message ?? 'not found'}`);
+  }
+
+  const row = assertSingleRow<CombiPickRow>(current, 'combi pick');
+
+  // Prevent re-settling a leg that already has a final result
+  const currentLegStatus = leg === 1 ? row.leg_1_status : row.leg_2_status;
+  if (currentLegStatus !== 'pending') {
+    throw new Error(
+      `Leg ${leg} ya fue registrada como "${currentLegStatus}". No se puede modificar.`
+    );
+  }
+
+  const otherLegStatus = leg === 1 ? row.leg_2_status : row.leg_1_status;
+
+  let newCombiStatus = row.status;
+  let newProfitUnits = row.profit_units;
+
+  if (status === 'lost') {
+    newCombiStatus = 'lost';
+    newProfitUnits = -1;
+  } else if (status === 'won' && otherLegStatus === 'won') {
+    const realOdds = row.combined_real_odds ?? row.combined_api_odds;
+    newCombiStatus = 'won';
+    newProfitUnits = realOdds !== null ? Number((realOdds - 1).toFixed(3)) : null;
+  }
+
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .update({
+      [legField]: status,
+      [resultField]: result ?? null,
+      status: newCombiStatus,
+      profit_units: newProfitUnits,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .select(COMBI_PICK_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to settle combi leg: ${error.message}`);
+  }
+
+  return assertSingleRow<CombiPickRow>(data, 'combi pick');
+}
+
+export async function listCombiPicks(limit = 60): Promise<CombiPickRow[]> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .select(COMBI_PICK_COLUMNS)
+    .order('game_day', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Failed to list combi picks: ${error.message}`);
+  }
+
+  return data ? assertRowArray<CombiPickRow>(data, 'combi pick') : [];
+}
+
+export async function listCombiPicksForRange(
+  startDate: string,
+  endDate: string
+): Promise<CombiPickRow[]> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .select(COMBI_PICK_COLUMNS)
+    .gte('game_day', startDate)
+    .lte('game_day', endDate)
+    .order('game_day', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to list combi picks for range: ${error.message}`);
+  }
+
+  return data ? assertRowArray<CombiPickRow>(data, 'combi pick') : [];
+}
+
+export async function getCombiStatsSummary(): Promise<CombiStatsSummary> {
+  const rows = await listCombiPicks(200);
+  return buildCombiStatsSummary(rows);
+}
+
+export async function getLatestSnapshotsForCombi(
+  startUtc: string,
+  endUtc: string
+): Promise<CombiSnapshotLight[]> {
+  const { data, error } = await supabase
+    .from('game_snapshots')
+    .select(COMBI_SNAPSHOT_COLUMNS)
+    .gte('start_time', startUtc)
+    .lt('start_time', endUtc)
+    .in('snapshot_stage', ['mid', 'open'])
+    .order('updated_at', { ascending: false })
+    .limit(40);
+
+  if (error) {
+    throw new Error(`Failed to fetch snapshots for combi: ${error.message}`);
+  }
+
+  const rows = data ? assertRowArray<CombiSnapshotLight>(data, 'combi snapshot') : [];
+
+  // Keep only the most recent snapshot per game_id (prefer mid over open)
+  const byGameId = new Map<string, CombiSnapshotLight>();
+  for (const row of rows) {
+    const existing = byGameId.get(row.game_id);
+    if (!existing) {
+      byGameId.set(row.game_id, row);
+    } else if (existing.snapshot_stage === 'open' && row.snapshot_stage === 'mid') {
+      byGameId.set(row.game_id, row);
+    }
+  }
+
+  return [...byGameId.values()];
+}
+
+// ─── Combi v2: picks-based candidate sourcing ────────────────────────────────
+
+const COMBI_BASE_PICK_COLUMNS = [
+  'id',
+  'game_id',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'snapshot_id'
+].join(',');
+
+export type CombiBasePickRow = {
+  id: string;
+  game_id: string;
+  market: string;
+  selection: string;
+  line: number | null;
+  odds: number | null;
+  confidence: string;
+  estimated_probability: number | null;
+  snapshot_id: string | null;
+};
+
+export async function getPicksForGameDay(
+  gameDay: string
+): Promise<CombiBasePickRow[]> {
+  const { data, error } = await supabase
+    .from('picks')
+    .select(COMBI_BASE_PICK_COLUMNS)
+    .eq('sport', 'MLB')
+    .eq('game_day', gameDay)
+    .not('odds', 'is', null)
+    .not('market', 'is', null)
+    .neq('market', 'PASS')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch picks for game day ${gameDay}: ${error.message}`);
+  }
+
+  const rows = data ? assertRowArray<CombiBasePickRow>(data, 'combi base pick') : [];
+
+  return rows.filter((row) => {
+    const sel = String(row.selection ?? '').trim().toUpperCase();
+    return sel !== 'NO BET' && sel !== 'PASS';
+  });
+}
+
+export async function getOddsBoardCacheForDate(
+  gameDay: string
+): Promise<OddsBoardCacheRow | null> {
+  return getOddsBoardCache(`mlb_main:${gameDay}`);
+}
+
+export async function getSnapshotsByGameIdsForCombi(
+  gameIds: string[]
+): Promise<CombiSnapshotLight[]> {
+  const ids = uniqueNonEmpty(gameIds);
+  if (!ids.length) return [];
+
+  const { data, error } = await supabase
+    .from('game_snapshots')
+    .select(COMBI_SNAPSHOT_COLUMNS)
+    .in('game_id', ids)
+    .in('snapshot_stage', ['mid', 'open'])
+    .order('updated_at', { ascending: false })
+    .limit(40);
+
+  if (error) {
+    throw new Error(`Failed to fetch snapshots by game ids for combi: ${error.message}`);
+  }
+
+  const rows = data ? assertRowArray<CombiSnapshotLight>(data, 'combi snapshot') : [];
+
+  const byGameId = new Map<string, CombiSnapshotLight>();
+  for (const row of rows) {
+    const existing = byGameId.get(row.game_id);
+    if (!existing) {
+      byGameId.set(row.game_id, row);
+    } else if (existing.snapshot_stage === 'open' && row.snapshot_stage === 'mid') {
+      byGameId.set(row.game_id, row);
+    }
+  }
+
+  return [...byGameId.values()];
 }

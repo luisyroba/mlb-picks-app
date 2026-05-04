@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
-import { supabase } from '@/lib/db';
+import { supabase, buildCombiStatsSummary, listCombiPicksForRange } from '@/lib/db';
 import { buildAuditMetrics } from '@/lib/audit-metrics';
+import { STAKING_MODEL_METADATA, buildStakingSummaries } from '@/lib/staking-summaries';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -402,10 +403,18 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const picks = await fetchPicksForRange(startDate, endDate);
+    const [picks, combiRows] = await Promise.all([
+      fetchPicksForRange(startDate, endDate),
+      listCombiPicksForRange(startDate, endDate)
+    ]);
+
     const exportedPicks = picks.map(enrichPickWithAuditMetrics);
     const gameSnapshots = await fetchSnapshotsForPicks(exportedPicks);
     const statsSummary = buildStatsSummary(exportedPicks);
+
+    const combiRowsInRange = combiRows;
+    const combiStats = buildCombiStatsSummary(combiRowsInRange);
+    const stakingSummaries = buildStakingSummaries(exportedPicks);
 
     const payload = {
       metadata: {
@@ -414,11 +423,16 @@ export async function GET(req: NextRequest) {
         generatedAt: new Date().toISOString(),
         totalPicks: exportedPicks.length,
         totalSnapshots: gameSnapshots.length,
+        totalCombis: combiRowsInRange.length,
         snapshot_export_mode: 'metadata_only',
-        snapshot_payload_included: false
+        snapshot_payload_included: false,
+        staking_model: STAKING_MODEL_METADATA
       },
       stats_summary: statsSummary,
+      ...stakingSummaries,
+      combi_summary: combiStats,
       picks: exportedPicks,
+      combi_picks: combiRowsInRange,
       game_snapshots: gameSnapshots
     };
 
