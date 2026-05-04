@@ -131,11 +131,37 @@ async function buildStorageEstimate() {
   };
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  fallback: T
+): Promise<T> {
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        setTimeout(() => resolve(fallback), timeoutMs);
+      })
+    ]);
+  } catch {
+    return fallback;
+  }
+}
+
 export async function GET() {
+  const startedAt = Date.now();
   try {
     // Este endpoint calcula solo storage.
     // Ya no frena la carga principal de /api/stats.
-    const storage = await buildStorageEstimate();
+    const storage = await withTimeout(buildStorageEstimate(), 5000, {
+      ok: false,
+      estimatedUsedMb: 0,
+      remainingMb: SUPABASE_FREE_DB_LIMIT_MB,
+      percentUsed: 0,
+      breakdown: [],
+      note: 'Storage estimate timeout; no bloquea /stats.'
+    });
+    console.info(`[stats-timing] storageMs=${Date.now() - startedAt}`);
 
     return NextResponse.json(storage);
   } catch (error) {

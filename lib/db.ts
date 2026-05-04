@@ -43,6 +43,17 @@ const PREGAME_SNAPSHOT_COLUMNS = [
   'updated_at'
 ].join(',');
 
+const PREGAME_SNAPSHOT_METADATA_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_stage',
+  'sport',
+  'game_status',
+  'start_time',
+  'created_at',
+  'updated_at'
+].join(',');
+
 const PICK_COLUMNS = [
   'id',
   'game_id',
@@ -149,11 +160,44 @@ const PICK_LEDGER_COLUMNS = [
   'updated_at'
 ].join(',');
 
+const PICK_STATS_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'implied_probability',
+  'edge',
+  'ev',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'status',
+  'profit_units',
+  'game_day',
+  'created_at',
+  'updated_at'
+].join(',');
+
 const ODDS_BOARD_CACHE_COLUMNS = [
   'id',
   'board_key',
   'sport',
   'payload',
+  'source',
+  'created_at',
+  'updated_at'
+].join(',');
+
+const ODDS_BOARD_CACHE_METADATA_COLUMNS = [
+  'id',
+  'board_key',
+  'sport',
   'source',
   'created_at',
   'updated_at'
@@ -232,6 +276,8 @@ export type PregameSnapshotRow = {
   created_at: string;
   updated_at: string;
 };
+
+export type PregameSnapshotMetadataRow = Omit<PregameSnapshotRow, 'payload' | 'alerts'>;
 
 export type PickRecordUpsertInput = {
   gameDay?: string | null;
@@ -358,6 +404,30 @@ export type PickLedgerRow = Pick<PickRow,
   | 'execution_reason'
   | 'status'
   | 'result'
+  | 'profit_units'
+  | 'game_day'
+  | 'created_at'
+  | 'updated_at'
+>;
+
+export type PickStatsRow = Pick<PickRow,
+  | 'id'
+  | 'game_id'
+  | 'snapshot_id'
+  | 'market'
+  | 'selection'
+  | 'line'
+  | 'odds'
+  | 'confidence'
+  | 'estimated_probability'
+  | 'implied_probability'
+  | 'edge'
+  | 'ev'
+  | 'execution_market'
+  | 'execution_selection'
+  | 'execution_line'
+  | 'execution_odds'
+  | 'status'
   | 'profit_units'
   | 'game_day'
   | 'created_at'
@@ -700,6 +770,30 @@ export async function getPregameSnapshotsByIds(
   return new Map(rows.map((row) => [row.id, row]));
 }
 
+export async function getPregameSnapshotMetadataByIds(
+  snapshotIds: string[]
+): Promise<Map<string, PregameSnapshotMetadataRow>> {
+  const uniqueIds = uniqueNonEmpty(snapshotIds);
+  if (!uniqueIds.length) {
+    return new Map<string, PregameSnapshotMetadataRow>();
+  }
+
+  const { data, error } = await supabase
+    .from('game_snapshots')
+    .select(PREGAME_SNAPSHOT_METADATA_COLUMNS)
+    .in('id', uniqueIds);
+
+  if (error) {
+    throw new Error(`Failed to fetch snapshot metadata by ids: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<PregameSnapshotMetadataRow>(data, 'pregame snapshot metadata')
+    : [];
+
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
 export async function getPregameSnapshotsForGames(
   gameIds: string[]
 ): Promise<
@@ -925,6 +1019,25 @@ export async function listConfirmedPicks(): Promise<PickRow[]> {
   return listPicks();
 }
 
+export async function listConfirmedPicksForStats(): Promise<PickStatsRow[]> {
+  const { data, error } = await supabase
+    .from('picks')
+    .select(PICK_STATS_COLUMNS)
+    .eq('sport', 'MLB')
+    .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch stats picks: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<PickStatsRow>(data, 'stats pick')
+    : [];
+
+  return rows.filter((pick) => isConfirmedPickRecord(pick));
+}
+
 export async function listConfirmedPicksForLedger(limit = 300): Promise<PickLedgerRow[]> {
   const { data, error } = await supabase
     .from('picks')
@@ -1059,6 +1172,8 @@ export type OddsBoardCacheRow = {
   updated_at: string;
 };
 
+export type OddsBoardCacheMetadataRow = Omit<OddsBoardCacheRow, 'payload'>;
+
 export async function saveOddsBoardCache(input: {
   boardKey: string;
   sport?: 'MLB';
@@ -1107,6 +1222,26 @@ export async function getOddsBoardCache(
   }
 
   return assertSingleRow<OddsBoardCacheRow>(data, 'odds board cache');
+}
+
+export async function getOddsBoardCacheMetadata(
+  boardKey: string
+): Promise<OddsBoardCacheMetadataRow | null> {
+  const { data, error } = await supabase
+    .from('odds_board_cache')
+    .select(ODDS_BOARD_CACHE_METADATA_COLUMNS)
+    .eq('board_key', boardKey)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to fetch odds board cache metadata: ${error.message}`);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  return assertSingleRow<OddsBoardCacheMetadataRow>(data, 'odds board cache metadata');
 }
 
 export async function getPremiumDailyLock(
@@ -1215,6 +1350,15 @@ const COMBI_PICK_COLUMNS = [
   'metadata'
 ].join(',');
 
+const COMBI_PICK_SUMMARY_COLUMNS = [
+  'id',
+  'game_day',
+  'status',
+  'combined_api_odds',
+  'combined_real_odds',
+  'profit_units'
+].join(',');
+
 export type CombiPickRow = {
   id: string;
   game_day: string;
@@ -1285,7 +1429,17 @@ export type CombiStatsSummary = {
   avg_combined_odds: number | null;
 };
 
-export function buildCombiStatsSummary(rows: CombiPickRow[]): CombiStatsSummary {
+export type CombiSummaryRow = Pick<
+  CombiPickRow,
+  | 'id'
+  | 'game_day'
+  | 'status'
+  | 'combined_api_odds'
+  | 'combined_real_odds'
+  | 'profit_units'
+>;
+
+export function buildCombiStatsSummary(rows: CombiSummaryRow[]): CombiStatsSummary {
   let wins = 0;
   let losses = 0;
   let profitUnitsTotal = 0;
@@ -1569,6 +1723,20 @@ export async function listCombiPicks(limit = 60): Promise<CombiPickRow[]> {
   }
 
   return data ? assertRowArray<CombiPickRow>(data, 'combi pick') : [];
+}
+
+export async function listCombiPickSummaries(limit = 60): Promise<CombiSummaryRow[]> {
+  const { data, error } = await supabase
+    .from('combi_picks')
+    .select(COMBI_PICK_SUMMARY_COLUMNS)
+    .order('game_day', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Failed to list combi pick summaries: ${error.message}`);
+  }
+
+  return data ? assertRowArray<CombiSummaryRow>(data, 'combi pick summary') : [];
 }
 
 export async function listCombiPicksForRange(

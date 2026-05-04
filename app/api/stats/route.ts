@@ -2,16 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getOriginHint, jsonResponseWithAudit } from '@/lib/api-egress-audit';
 import {
   getLatestMarketSnapshotsByGameIds,
-  getPregameSnapshotsByIds,
+  getPregameSnapshotMetadataByIds,
   getOddsBoardCache,
-  listConfirmedPicks,
-  listCombiPicks,
+  getOddsBoardCacheMetadata,
+  listConfirmedPicksForStats,
+  listCombiPickSummaries,
   buildCombiStatsSummary,
   getPremiumDailyLock,
   createPremiumDailyLock,
   closePremiumDailyLock,
   supabase,
-  type CombiPickRow,
+  type CombiSummaryRow,
   type CombiStatsSummary
 } from '@/lib/db';
 import { resolveMatchupLabel } from '@/lib/matchup-label';
@@ -973,7 +974,7 @@ function buildDailySummary(
 
 function buildDisplaySlice(
   picks: StatsPickRecord[],
-  combiRows: CombiPickRow[],
+  combiRows: CombiSummaryRow[],
   options: {
     key: string;
     label: string;
@@ -1113,6 +1114,18 @@ function formatUsageMonthKey(date = new Date()): string {
   return `${parts.year}-${parts.month}`;
 }
 
+async function timeAsync<T>(
+  action: () => Promise<T>,
+  onComplete: (elapsedMs: number) => void
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await action();
+  } finally {
+    onComplete(Date.now() - startedAt);
+  }
+}
+
 function getCounterValue(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -1131,7 +1144,7 @@ async function buildOddsUsageSummary() {
   const [dailyRow, monthlyRow, oddsBoardRow] = await Promise.all([
     getOddsBoardCache(dayKey).catch(() => null),
     getOddsBoardCache(monthKey).catch(() => null),
-    getOddsBoardCache('mlb_main').catch(() => null)
+    getOddsBoardCacheMetadata('mlb_main').catch(() => null)
   ]);
 
   const todayCount = getCounterValue((dailyRow?.payload as Record<string, unknown> | null)?.count);
@@ -1198,13 +1211,30 @@ async function buildOddsUsageSummary() {
 export async function GET(req: NextRequest) {
   try {
 const originHint = getOriginHint(req.headers);
+const totalStartedAt = Date.now();
+let picksMs = 0;
+let combisMs = 0;
+let summariesMs = 0;
+let storageMs = 0;
 const [confirmedPicks, summaryViewResult, combiRows] = await Promise.all([
-  listConfirmedPicks(),
-  supabase
-    .from('pick_stats_summary')
-    .select('*')
-    .single(),
-  listCombiPicks(200)
+  timeAsync(() => listConfirmedPicksForStats(), (elapsedMs) => {
+    picksMs = elapsedMs;
+  }),
+  timeAsync(
+    () =>
+      Promise.resolve(
+        supabase
+          .from('pick_stats_summary')
+          .select('total_picks,wins,losses,pending,wr,profit,roi')
+          .single()
+      ),
+    (elapsedMs) => {
+      summariesMs = elapsedMs;
+    }
+  ),
+  timeAsync(() => listCombiPickSummaries(200), (elapsedMs) => {
+    combisMs = elapsedMs;
+  })
 ]);
 
     const summaryDb = summaryViewResult.data;
@@ -1391,7 +1421,7 @@ const [oddsUsage, vercelUsage, snapshotsById, marketSnapshotsByGameId] = await P
   // Snapshots recientes para premium/top 3/recent:
   // limitamos a RECENT_UI_LIMIT para no cargar todo el historial.
   withTimeout(
-    getPregameSnapshotsByIds(
+    getPregameSnapshotMetadataByIds(
       recentPicks
         .slice(0, RECENT_UI_LIMIT)
         .map((pick) => pick.snapshot_id ?? '')
@@ -1423,10 +1453,7 @@ const storage = {
 
    const recentWithSnapshots = recentPicks.map((pick) => {
   const snapshot = pick.snapshot_id ? snapshotsById.get(pick.snapshot_id) ?? null : null;
-  const snapshotPayload =
-    snapshot?.payload && typeof snapshot.payload === 'object'
-      ? (snapshot.payload as Record<string, unknown>)
-      : null;
+  const snapshotPayload = null;
 
   const gameDate = getGameDate(
     snapshot?.start_time ??
@@ -1847,6 +1874,11 @@ const rawTodayCandidates = pickRecords
       liveViews.find((period) => period.isCurrent)?.key ??
       liveViews.at(-1)?.key ??
       null;
+
+    const totalMs = Date.now() - totalStartedAt;
+    console.info(
+      `[stats-timing] picksMs=${picksMs} combisMs=${combisMs} summariesMs=${summariesMs} storageMs=${storageMs} totalMs=${totalMs}`
+    );
 
     return jsonResponseWithAudit('/api/stats', {
       ok: true,
