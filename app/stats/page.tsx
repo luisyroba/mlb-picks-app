@@ -60,6 +60,28 @@ type CombiStatsSummary = {
   avg_combined_odds: number | null;
 };
 
+type ClvBucketSummary = {
+  key: string;
+  total: number;
+  total_with_clv: number;
+  positive: number;
+  negative: number;
+  neutral: number;
+  unavailable: number;
+  avg_clv_percent: number | null;
+};
+
+type ClvSummary = {
+  total_with_clv: number;
+  positive: number;
+  negative: number;
+  neutral: number;
+  unavailable: number;
+  avg_clv_percent: number | null;
+  avg_clv_by_confidence: ClvBucketSummary[];
+  avg_clv_by_market: ClvBucketSummary[];
+};
+
 type RecentItem = {
   id: string;
   gameId: string;
@@ -247,6 +269,7 @@ type SegmentedStatsSlice = {
   premium: SegmentedPremiumView;
   daily: DailySummaryItem[];
   combiSummary: CombiStatsSummary;
+  clvSummary: ClvSummary;
 };
 
 type LiveStatsView = SegmentedStatsSlice & {
@@ -976,6 +999,15 @@ const byConfidence = selectedView?.byConfidence ?? [];
 const byMarket = selectedView?.byMarket ?? [];
 const byEdgeRange = selectedView?.byEdgeRange ?? [];
 const dailySummary = selectedView?.daily ?? [];
+const clvSummary = selectedView?.clvSummary ?? null;
+const clvPositiveRate =
+  clvSummary && clvSummary.total_with_clv > 0
+    ? clvSummary.positive / clvSummary.total_with_clv
+    : null;
+const clvNegativeRate =
+  clvSummary && clvSummary.total_with_clv > 0
+    ? clvSummary.negative / clvSummary.total_with_clv
+    : null;
 const premiumView = selectedView?.premium ?? {
   summary: {
     total: 0,
@@ -1203,6 +1235,65 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+            {clvSummary && (
+              <div className="rounded-[1.2rem] border border-[var(--line-soft)] bg-white/82 px-3 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--ink-muted)]">CLV</div>
+                    <div className="mt-1 text-sm font-semibold text-[var(--ink-strong)]">
+                      {clvSummary.total_with_clv > 0
+                        ? `${clvSummary.total_with_clv} picks con cierre`
+                        : 'CLV todavia no capturado'}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-right">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Positivo</div>
+                      <div className="text-sm font-semibold text-[var(--tone-good)]">{formatRate(clvPositiveRate)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Negativo</div>
+                      <div className="text-sm font-semibold text-[var(--tone-bad)]">{formatRate(clvNegativeRate)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">Avg CLV</div>
+                      <div className="text-sm font-semibold text-[var(--ink-strong)]">{formatRate(clvSummary.avg_clv_percent)}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {clvSummary.total_with_clv > 0 && (
+                  <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                    <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Por mercado</div>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {clvSummary.avg_clv_by_market.slice(0, 6).map((bucket) => (
+                          <span
+                            key={`clv-market-${bucket.key}`}
+                            className="rounded-full border border-[var(--line-soft)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--ink-soft)]"
+                          >
+                            {bucket.key} {formatRate(bucket.avg_clv_percent)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-[0.95rem] bg-[var(--surface-soft)] px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--ink-muted)]">Por tier</div>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {clvSummary.avg_clv_by_confidence.slice(0, 6).map((bucket) => (
+                          <span
+                            key={`clv-tier-${bucket.key}`}
+                            className="rounded-full border border-[var(--line-soft)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--ink-soft)]"
+                          >
+                            {bucket.key} {formatRate(bucket.avg_clv_percent)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

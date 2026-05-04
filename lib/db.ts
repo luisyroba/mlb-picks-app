@@ -180,6 +180,71 @@ const PICK_STATS_COLUMNS = [
   'status',
   'profit_units',
   'game_day',
+  'closing_odds',
+  'closing_line',
+  'closing_market',
+  'closing_selection',
+  'closing_source',
+  'closing_snapshot_id',
+  'closing_captured_at',
+  'clv_decimal',
+  'clv_percent',
+  'clv_status',
+  'clv_notes',
+  'created_at',
+  'updated_at'
+].join(',');
+
+const PICK_STATS_FALLBACK_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'implied_probability',
+  'edge',
+  'ev',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'status',
+  'profit_units',
+  'game_day',
+  'created_at',
+  'updated_at'
+].join(',');
+
+const PICK_CLV_CAPTURE_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'market',
+  'selection',
+  'line',
+  'confidence',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'execution_side',
+  'status',
+  'game_day',
+  'closing_odds',
+  'closing_line',
+  'closing_market',
+  'closing_selection',
+  'closing_source',
+  'closing_snapshot_id',
+  'closing_captured_at',
+  'clv_decimal',
+  'clv_percent',
+  'clv_status',
+  'clv_notes',
   'created_at',
   'updated_at'
 ].join(',');
@@ -199,6 +264,16 @@ const ODDS_BOARD_CACHE_METADATA_COLUMNS = [
   'board_key',
   'sport',
   'source',
+  'created_at',
+  'updated_at'
+].join(',');
+
+const CLV_SNAPSHOT_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_stage',
+  'start_time',
+  'payload',
   'created_at',
   'updated_at'
 ].join(',');
@@ -359,6 +434,18 @@ export type PickRow = {
   result: string | null;
   profit_units: number | null;
 
+  closing_odds?: number | null;
+  closing_line?: number | null;
+  closing_market?: string | null;
+  closing_selection?: string | null;
+  closing_source?: string | null;
+  closing_snapshot_id?: string | null;
+  closing_captured_at?: string | null;
+  clv_decimal?: number | null;
+  clv_percent?: number | null;
+  clv_status?: 'positive' | 'negative' | 'neutral' | 'unavailable' | string | null;
+  clv_notes?: string | null;
+
   created_at: string;
   updated_at: string;
 };
@@ -430,9 +517,64 @@ export type PickStatsRow = Pick<PickRow,
   | 'status'
   | 'profit_units'
   | 'game_day'
+  | 'closing_odds'
+  | 'closing_line'
+  | 'closing_market'
+  | 'closing_selection'
+  | 'closing_source'
+  | 'closing_snapshot_id'
+  | 'closing_captured_at'
+  | 'clv_decimal'
+  | 'clv_percent'
+  | 'clv_status'
+  | 'clv_notes'
   | 'created_at'
   | 'updated_at'
 >;
+
+export type PickClvCaptureRow = Pick<PickRow,
+  | 'id'
+  | 'game_id'
+  | 'snapshot_id'
+  | 'market'
+  | 'selection'
+  | 'line'
+  | 'confidence'
+  | 'execution_market'
+  | 'execution_selection'
+  | 'execution_line'
+  | 'execution_odds'
+  | 'execution_side'
+  | 'status'
+  | 'game_day'
+  | 'closing_odds'
+  | 'closing_line'
+  | 'closing_market'
+  | 'closing_selection'
+  | 'closing_source'
+  | 'closing_snapshot_id'
+  | 'closing_captured_at'
+  | 'clv_decimal'
+  | 'clv_percent'
+  | 'clv_status'
+  | 'clv_notes'
+  | 'created_at'
+  | 'updated_at'
+>;
+
+export type PickClvUpdateInput = {
+  closing_odds: number | null;
+  closing_line: number | null;
+  closing_market: string | null;
+  closing_selection: string | null;
+  closing_source: string | null;
+  closing_snapshot_id: string | null;
+  closing_captured_at: string;
+  clv_decimal: number | null;
+  clv_percent: number | null;
+  clv_status: 'positive' | 'negative' | 'neutral' | 'unavailable';
+  clv_notes: string | null;
+};
 
 function assertSingleRow<T>(
   data: unknown,
@@ -457,6 +599,14 @@ function assertRowArray<T>(
   }
 
   return data as T[];
+}
+
+function isMissingClvColumnError(error: { message?: string } | null | undefined): boolean {
+  return Boolean(
+    error?.message &&
+      /closing_odds|closing_line|closing_market|closing_selection|closing_source|closing_snapshot_id|closing_captured_at|clv_decimal|clv_percent|clv_status|clv_notes/i.test(error.message) &&
+      /column|schema cache|could not find|does not exist/i.test(error.message)
+  );
 }
 
 function readPickString(value: unknown): string {
@@ -1020,12 +1170,19 @@ export async function listConfirmedPicks(): Promise<PickRow[]> {
 }
 
 export async function listConfirmedPicksForStats(): Promise<PickStatsRow[]> {
-  const { data, error } = await supabase
-    .from('picks')
-    .select(PICK_STATS_COLUMNS)
-    .eq('sport', 'MLB')
-    .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
-    .order('updated_at', { ascending: false });
+  const runQuery = (columns: string) =>
+    supabase
+      .from('picks')
+      .select(columns)
+      .eq('sport', 'MLB')
+      .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
+      .order('updated_at', { ascending: false });
+
+  let { data, error } = await runQuery(PICK_STATS_COLUMNS);
+
+  if (error && isMissingClvColumnError(error)) {
+    ({ data, error } = await runQuery(PICK_STATS_FALLBACK_COLUMNS));
+  }
 
   if (error) {
     throw new Error(`Failed to fetch stats picks: ${error.message}`);
@@ -1036,6 +1193,57 @@ export async function listConfirmedPicksForStats(): Promise<PickStatsRow[]> {
     : [];
 
   return rows.filter((pick) => isConfirmedPickRecord(pick));
+}
+
+export async function listPicksForClvCapture(
+  startDate: string,
+  endDate: string
+): Promise<PickClvCaptureRow[]> {
+  const { data, error } = await supabase
+    .from('picks')
+    .select(PICK_CLV_CAPTURE_COLUMNS)
+    .eq('sport', 'MLB')
+    .gte('game_day', startDate)
+    .lte('game_day', endDate)
+    .in('status', ['pending', 'won', 'lost'])
+    .not('execution_odds', 'is', null)
+    .order('game_day', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    if (isMissingClvColumnError(error)) {
+      throw new Error('CLV columns are missing on picks. Run scripts/add-picks-clv-columns.sql before capturing CLV.');
+    }
+
+    throw new Error(`Failed to fetch picks for CLV capture: ${error.message}`);
+  }
+
+  const rows = data
+    ? assertRowArray<PickClvCaptureRow>(data, 'CLV pick')
+    : [];
+
+  return rows.filter((pick) => isConfirmedPickRecord(pick));
+}
+
+export async function updatePickClvAudit(
+  pickId: string,
+  input: PickClvUpdateInput
+): Promise<PickClvCaptureRow> {
+  const { data, error } = await supabase
+    .from('picks')
+    .update({
+      ...input,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', pickId)
+    .select(PICK_CLV_CAPTURE_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update pick CLV audit: ${error.message}`);
+  }
+
+  return assertSingleRow<PickClvCaptureRow>(data, 'CLV pick');
 }
 
 export async function listConfirmedPicksForLedger(limit = 300): Promise<PickLedgerRow[]> {
@@ -1242,6 +1450,27 @@ export async function getOddsBoardCacheMetadata(
   }
 
   return assertSingleRow<OddsBoardCacheMetadataRow>(data, 'odds board cache metadata');
+}
+
+export async function listOddsBoardCachesByKeys(
+  boardKeys: string[]
+): Promise<OddsBoardCacheRow[]> {
+  const keys = uniqueNonEmpty(boardKeys);
+  if (!keys.length) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('odds_board_cache')
+    .select(ODDS_BOARD_CACHE_COLUMNS)
+    .in('board_key', keys)
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to fetch odds board caches by key: ${error.message}`);
+  }
+
+  return data ? assertRowArray<OddsBoardCacheRow>(data, 'odds board cache') : [];
 }
 
 export async function getPremiumDailyLock(
@@ -1487,6 +1716,16 @@ export type CombiSnapshotLight = {
   snapshot_stage: string;
   start_time: string | null;
   payload: Record<string, unknown>;
+};
+
+export type ClvSnapshotRow = {
+  id: string;
+  game_id: string;
+  snapshot_stage: string;
+  start_time: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 };
 
 export async function getCombiPickForDay(
@@ -1755,6 +1994,29 @@ export async function listCombiPicksForRange(
   }
 
   return data ? assertRowArray<CombiPickRow>(data, 'combi pick') : [];
+}
+
+export async function getSnapshotsForClvCapture(
+  gameIds: string[]
+): Promise<ClvSnapshotRow[]> {
+  const ids = uniqueNonEmpty(gameIds);
+  if (!ids.length) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('game_snapshots')
+    .select(CLV_SNAPSHOT_COLUMNS)
+    .in('game_id', ids)
+    .in('snapshot_stage', ['open', 'mid', 'final'])
+    .order('updated_at', { ascending: false })
+    .limit(Math.min(Math.max(ids.length * 3, 20), 120));
+
+  if (error) {
+    throw new Error(`Failed to fetch snapshots for CLV capture: ${error.message}`);
+  }
+
+  return data ? assertRowArray<ClvSnapshotRow>(data, 'CLV snapshot') : [];
 }
 
 export async function getCombiStatsSummary(): Promise<CombiStatsSummary> {

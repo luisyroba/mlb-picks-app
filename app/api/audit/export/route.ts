@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { supabase, buildCombiStatsSummary, listCombiPicksForRange } from '@/lib/db';
 import { buildAuditMetrics } from '@/lib/audit-metrics';
 import { STAKING_MODEL_METADATA, buildStakingSummaries } from '@/lib/staking-summaries';
+import { buildClvSummary } from '@/lib/clv-summary';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -27,6 +28,17 @@ type ExportPickRow = Record<string, unknown> & {
   edge_calibrated?: number | null;
   ev_raw?: number | null;
   ev_calibrated?: number | null;
+  closing_odds?: number | null;
+  closing_line?: number | null;
+  closing_market?: string | null;
+  closing_selection?: string | null;
+  closing_source?: string | null;
+  closing_snapshot_id?: string | null;
+  closing_captured_at?: string | null;
+  clv_decimal?: number | null;
+  clv_percent?: number | null;
+  clv_status?: string | null;
+  clv_notes?: string | null;
 };
 
 type ExportSnapshotRow = Record<string, unknown> & {
@@ -46,6 +58,55 @@ const SNAPSHOT_EXPORT_COLUMNS = [
 ].join(',');
 
 const MAX_SNAPSHOT_EXPORT_ROWS = 300;
+
+const PICK_EXPORT_COLUMNS = [
+  'id',
+  'game_id',
+  'snapshot_id',
+  'snapshot_stage',
+  'sport',
+  'market',
+  'selection',
+  'line',
+  'odds',
+  'confidence',
+  'estimated_probability',
+  'implied_probability',
+  'edge',
+  'ev',
+  'p_raw',
+  'p_calibrated',
+  'edge_raw',
+  'edge_calibrated',
+  'ev_raw',
+  'ev_calibrated',
+  'reason',
+  'alt_market_1',
+  'alt_market_2',
+  'execution_market',
+  'execution_selection',
+  'execution_line',
+  'execution_odds',
+  'execution_side',
+  'execution_reason',
+  'status',
+  'result',
+  'profit_units',
+  'game_day',
+  'closing_odds',
+  'closing_line',
+  'closing_market',
+  'closing_selection',
+  'closing_source',
+  'closing_snapshot_id',
+  'closing_captured_at',
+  'clv_decimal',
+  'clv_percent',
+  'clv_status',
+  'clv_notes',
+  'created_at',
+  'updated_at'
+].join(',');
 
 type BucketSummary = {
   key: string;
@@ -80,6 +141,14 @@ function roundMetric(value: number | null): number | null {
 
 function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
   return [...new Set(values.map((value) => String(value ?? '').trim()).filter(Boolean))];
+}
+
+function isMissingClvColumnError(error: { message?: string } | null | undefined): boolean {
+  return Boolean(
+    error?.message &&
+      /closing_odds|closing_line|closing_market|closing_selection|closing_source|closing_snapshot_id|closing_captured_at|clv_decimal|clv_percent|clv_status|clv_notes/i.test(error.message) &&
+      /column|schema cache|could not find|does not exist/i.test(error.message)
+  );
 }
 
 function getEffectiveMarket(pick: ExportPickRow): string {
@@ -303,20 +372,27 @@ function enrichPickWithAuditMetrics(pick: ExportPickRow) {
 }
 
 async function fetchPicksForRange(startDate: string, endDate: string): Promise<ExportPickRow[]> {
-  const { data, error } = await supabase
-    .from('picks')
-    .select('*')
-    .eq('sport', 'MLB')
-    .gte('game_day', startDate)
-    .lte('game_day', endDate)
-    .order('game_day', { ascending: true })
-    .order('created_at', { ascending: true });
+  const runQuery = (columns: string) =>
+    supabase
+      .from('picks')
+      .select(columns)
+      .eq('sport', 'MLB')
+      .gte('game_day', startDate)
+      .lte('game_day', endDate)
+      .order('game_day', { ascending: true })
+      .order('created_at', { ascending: true });
+
+  let { data, error } = await runQuery(PICK_EXPORT_COLUMNS);
+
+  if (error && isMissingClvColumnError(error)) {
+    ({ data, error } = await runQuery('*'));
+  }
 
   if (error) {
     throw new Error(`Failed to fetch picks for audit export: ${error.message}`);
   }
 
-  return Array.isArray(data) ? (data as ExportPickRow[]) : [];
+  return Array.isArray(data) ? (data as unknown as ExportPickRow[]) : [];
 }
 
 async function fetchSnapshotsForPicks(picks: ExportPickRow[]): Promise<ExportSnapshotRow[]> {
@@ -415,6 +491,7 @@ export async function GET(req: NextRequest) {
     const combiRowsInRange = combiRows;
     const combiStats = buildCombiStatsSummary(combiRowsInRange);
     const stakingSummaries = buildStakingSummaries(exportedPicks);
+    const clvSummary = buildClvSummary(exportedPicks);
 
     const payload = {
       metadata: {
@@ -430,6 +507,7 @@ export async function GET(req: NextRequest) {
       },
       stats_summary: statsSummary,
       ...stakingSummaries,
+      clv_summary: clvSummary,
       combi_summary: combiStats,
       picks: exportedPicks,
       combi_picks: combiRowsInRange,

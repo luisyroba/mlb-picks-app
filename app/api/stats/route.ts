@@ -25,6 +25,7 @@ import {
 import { getSlateDayKey } from '@/lib/slate-day';
 import { buildVercelBudgetSummary } from '@/lib/vercel-ops';
 import { buildStakingSummaries, type StakingSummaries } from '@/lib/staking-summaries';
+import { buildClvSummary, type ClvSummary } from '@/lib/clv-summary';
 
 const SUPABASE_FREE_DB_LIMIT_MB = 500;
 const ODDS_MONTHLY_LIMIT = 2500;
@@ -36,6 +37,11 @@ type StatsPickRecord = Record<string, unknown> & {
   game_date_key: string | null;
   game_start_time: string | null;
   game_label: string;
+  confidence?: unknown;
+  market?: unknown;
+  execution_market?: unknown;
+  clv_percent?: unknown;
+  clv_status?: unknown;
 };
 
 type PremiumPickResult = {
@@ -219,6 +225,7 @@ type DisplaySlice = {
   premium: SlicePremiumView;
   daily: DailySummaryItem[];
   combiSummary: CombiStatsSummary;
+  clvSummary: ClvSummary;
 };
 
 type LivePeriodMeta = {
@@ -994,6 +1001,7 @@ function buildDisplaySlice(
       odds: pick.odds
     }))
   );
+  const clvSummary = buildClvSummary(picks);
   const buckets = buildSliceBuckets(picks);
   const combiRowsInSlice = combiRows.filter((row) => {
     const day = String(row.game_day ?? '');
@@ -1049,7 +1057,8 @@ function buildDisplaySlice(
       betterPick: options.currentPremiumContext?.betterPick ?? null
     },
     daily: buildDailySummary(picks, premiumAudit, options.currentPremiumContext),
-    combiSummary: buildCombiStatsSummary(combiRowsInSlice)
+    combiSummary: buildCombiStatsSummary(combiRowsInSlice),
+    clvSummary
   };
 }
 
