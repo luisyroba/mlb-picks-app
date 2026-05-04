@@ -59,7 +59,8 @@ const NAV_ITEMS = [
   { href: '/', label: 'Console' },
   { href: '/picks', label: 'Picks' },
   { href: '/live', label: 'Live' },
-  { href: '/stats', label: 'Stats' }
+  { href: '/stats', label: 'Stats' },
+  { href: '/combi-lab', label: 'Combi Lab' }
 ] as const;
 
 export function PrimaryNav({ className = 'mt-4' }: { className?: string }) {
