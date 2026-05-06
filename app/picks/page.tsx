@@ -9,6 +9,7 @@ import { buildStakingSummaries } from '@/lib/staking-summaries';
 
 type PickItem = {
   id: string;
+  gameId?: string;
   gameLabel: string;
   market: string;
   confidence: string;
@@ -30,6 +31,7 @@ type PickItem = {
 type PicksResponse = {
   ok: boolean;
   error?: string;
+  message?: string;
   picks?: PickItem[];
 };
 
@@ -364,10 +366,10 @@ const loadPicks = useCallback(async (options?: LoadPicksOptions) => {
       signal
     });
 
-    const json = (await res.json()) as PicksResponse;
+    const json = (await res.json().catch(() => ({}))) as PicksResponse;
 
     if (!res.ok || !json.ok) {
-      throw new Error(json.error || 'No se pudieron cargar los picks');
+      throw new Error(json.message || json.error || 'No se pudieron cargar los picks');
     }
 
     setPicks(json.picks ?? []);

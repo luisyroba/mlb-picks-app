@@ -433,6 +433,22 @@ type StatsResponse = {
     };
   };
 };
+
+type ClvCaptureResponse = {
+  ok: boolean;
+  error?: string;
+  message?: string;
+  totalPicks?: number;
+  alreadyCaptured?: number;
+  newlyCaptured?: number;
+  previewedNew?: number;
+  matched?: number;
+  unavailable?: number;
+  positive?: number;
+  negative?: number;
+  neutral?: number;
+  apiCallsMade?: number;
+};
 const SOLID_HISTORY_PAGE_SIZE = 8;
 
 function parseUiDate(value?: string | null) {
@@ -873,6 +889,8 @@ export default function StatsPage() {
   const [solidHistoryOpen, setSolidHistoryOpen] = useState(false);
   const [selectedDataMode, setSelectedDataMode] = useState<'live' | 'testing'>('live');
   const [selectedLivePeriodKey, setSelectedLivePeriodKey] = useState<string | null>(null);
+  const [clvCaptureLoading, setClvCaptureLoading] = useState(false);
+  const [clvCaptureMessage, setClvCaptureMessage] = useState<string | null>(null);
 
 const loadStats = useCallback(async () => {
   try {
@@ -1035,6 +1053,51 @@ const selectedScopeLabel =
     : selectedLiveView?.label ?? 'Live';
 const isLiveCurrentPeriod =
   selectedDataMode === 'live' && Boolean(selectedLiveView?.isCurrent);
+const canCaptureClv = Boolean(selectedView?.startDate && selectedView.endDate);
+
+const handleCaptureClv = useCallback(async () => {
+  if (!selectedView?.startDate || !selectedView.endDate) return;
+
+  const confirmed = window.confirm(
+    `Capturar CLV para ${selectedView.startDate} a ${selectedView.endDate}?`
+  );
+  if (!confirmed) return;
+
+  try {
+    setClvCaptureLoading(true);
+    setClvCaptureMessage(null);
+
+    const res = await fetch('/api/clv/capture', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-origin-hint': 'stats-page-clv-capture'
+      },
+      body: JSON.stringify({
+        startDate: selectedView.startDate,
+        endDate: selectedView.endDate,
+        dryRun: false
+      })
+    });
+    const json = (await res.json().catch(() => ({}))) as ClvCaptureResponse;
+
+    if (!res.ok || !json.ok) {
+      throw new Error(json.message || json.error || 'No se pudo capturar CLV');
+    }
+
+    setClvCaptureMessage(
+      `CLV: ${json.newlyCaptured ?? 0} nuevos, ${json.alreadyCaptured ?? 0} existentes, ${json.matched ?? 0} matched, ${json.unavailable ?? 0} unavailable.`
+    );
+    await loadStats();
+  } catch (captureError) {
+    setClvCaptureMessage(
+      captureError instanceof Error ? captureError.message : 'Error capturando CLV'
+    );
+  } finally {
+    setClvCaptureLoading(false);
+  }
+}, [loadStats, selectedView?.endDate, selectedView?.startDate]);
 
 // DB card: si ya llegÃ³ el endpoint separado, usamos ese.
 // Si todavÃ­a no llega, usamos usage.db del payload principal.
@@ -1262,6 +1325,22 @@ const currentPremiumPick = useMemo<PremiumPanelPick | null>(() => {
                       <div className="text-sm font-semibold text-[var(--ink-strong)]">{formatRate(clvSummary.avg_clv_percent)}</div>
                     </div>
                   </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!canCaptureClv || clvCaptureLoading}
+                    onClick={() => void handleCaptureClv()}
+                    className="rounded-full border border-[var(--line-soft)] bg-white px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)] transition hover:text-[var(--ink-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {clvCaptureLoading ? 'Capturando...' : 'Capturar CLV del rango'}
+                  </button>
+                  {clvCaptureMessage && (
+                    <div className="text-[11px] font-medium text-[var(--ink-soft)]">
+                      {clvCaptureMessage}
+                    </div>
+                  )}
                 </div>
 
                 {clvSummary.total_with_clv > 0 && (

@@ -61,6 +61,8 @@ export function resolveMatchupLabel(options: {
   snapshotPayload?: SnapshotPayload;
   marketSnapshot?: MarketSnapshotLike;
   gameId?: string | null;
+  pendingLabel?: string;
+  allowGameIdFallback?: boolean;
 }) {
   const fromSnapshotShortName = getEspnShortName(options.snapshotPayload ?? null);
   if (fromSnapshotShortName && !isNumericOnly(fromSnapshotShortName)) {
@@ -85,5 +87,9 @@ export function resolveMatchupLabel(options: {
     return fallbackLabel;
   }
 
-  return cleanText(options.gameId) ?? '';
+  if (options.allowGameIdFallback !== false) {
+    return cleanText(options.gameId) ?? options.pendingLabel ?? '';
+  }
+
+  return options.pendingLabel ?? '';
 }

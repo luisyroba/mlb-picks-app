@@ -497,6 +497,12 @@ export type PickLedgerRow = Pick<PickRow,
   | 'updated_at'
 >;
 
+export type LedgerPickListOptions = {
+  startDate?: string | null;
+  endDate?: string | null;
+  limit?: number;
+};
+
 export type PickStatsRow = Pick<PickRow,
   | 'id'
   | 'game_id'
@@ -1246,14 +1252,30 @@ export async function updatePickClvAudit(
   return assertSingleRow<PickClvCaptureRow>(data, 'CLV pick');
 }
 
-export async function listConfirmedPicksForLedger(limit = 300): Promise<PickLedgerRow[]> {
-  const { data, error } = await supabase
+export async function listConfirmedPicksForLedger(
+  options: LedgerPickListOptions | number = {}
+): Promise<PickLedgerRow[]> {
+  const normalizedOptions =
+    typeof options === 'number' ? { limit: options } : options;
+
+  let query = supabase
     .from('picks')
     .select(PICK_LEDGER_COLUMNS)
     .eq('sport', 'MLB')
     .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
-    .order('updated_at', { ascending: false })
-    .limit(limit);
+    .order('updated_at', { ascending: false });
+
+  if (normalizedOptions.startDate) {
+    query = query.gte('game_day', normalizedOptions.startDate);
+  }
+
+  if (normalizedOptions.endDate) {
+    query = query.lte('game_day', normalizedOptions.endDate);
+  }
+
+  query = query.limit(normalizedOptions.limit ?? 300);
+
+  const { data, error } = await query;
 
   if (error) {
     throw new Error(`Failed to fetch ledger picks: ${error.message}`);

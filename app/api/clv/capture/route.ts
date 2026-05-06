@@ -55,6 +55,9 @@ type PreviewRow = {
   action: 'preview' | 'updated' | 'skipped_existing';
 };
 
+const TEMPORARY_SUPABASE_MESSAGE =
+  'Supabase temporalmente no respondió. Reintenta en unos segundos.';
+
 function isValidDateKey(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
@@ -482,6 +485,74 @@ function summarizeRows(rows: PreviewRow[]) {
   };
 }
 
+function hasExistingClvAudit(pick: PickClvCaptureRow): boolean {
+  return Boolean(
+    pick.closing_captured_at ||
+      pick.closing_odds !== null ||
+      pick.closing_line !== null ||
+      pick.closing_source ||
+      pick.closing_snapshot_id ||
+      pick.clv_decimal !== null ||
+      pick.clv_percent !== null ||
+      pick.clv_status
+  );
+}
+
+function groupUnavailableReasons(rows: PreviewRow[]) {
+  const grouped: Record<string, number> = {};
+
+  for (const row of rows) {
+    if (row.clvStatus !== 'unavailable') continue;
+    const key = row.clvNotes?.trim() || 'unavailable';
+    grouped[key] = (grouped[key] ?? 0) + 1;
+  }
+
+  return grouped;
+}
+
+function getSupabaseErrorCode(error: unknown): string | null {
+  const record = error && typeof error === 'object' ? (error as Record<string, unknown>) : null;
+  const code = record?.code ?? record?.status ?? record?.statusCode;
+  if (typeof code === 'string' || typeof code === 'number') return String(code);
+
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (/\b521\b|web server is down|cloudflare/i.test(message)) return '521';
+  if (/timeout|timed out|fetch failed|network/i.test(message)) return 'NETWORK';
+  return null;
+}
+
+function isTemporarySupabaseError(error: unknown) {
+  const code = getSupabaseErrorCode(error);
+  return code === '521' || code === 'NETWORK';
+}
+
+async function withReadRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (!isTemporarySupabaseError(error)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return fn();
+  }
+}
+
+async function applyClvUpdates(
+  updates: Array<{ pick: PickClvCaptureRow; input: PickClvUpdateInput }>
+) {
+  const chunkSize = 3;
+  const updated: PickClvCaptureRow[] = [];
+
+  for (let index = 0; index < updates.length; index += chunkSize) {
+    const chunk = updates.slice(index, index + chunkSize);
+    const result = await Promise.all(
+      chunk.map(({ pick, input }) => updatePickClvAudit(pick.id, input))
+    );
+    updated.push(...result);
+  }
+
+  return updated;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json().catch(() => ({}))) as CaptureBody;
@@ -510,14 +581,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const picks = await listPicksForClvCapture(startDate, endDate);
+    const picks = await withReadRetry(() => listPicksForClvCapture(startDate, endDate));
     const gameIds = [...new Set(picks.map((pick) => pick.game_id).filter(Boolean))];
     const gameDays = [...new Set(picks.map((pick) => pick.game_day).filter(Boolean))] as string[];
     const boardKeys = gameDays.map((gameDay) => `mlb_main:${gameDay}`);
 
     const [snapshots, boards] = await Promise.all([
-      getSnapshotsForClvCapture(gameIds),
-      listOddsBoardCachesByKeys(boardKeys)
+      withReadRetry(() => getSnapshotsForClvCapture(gameIds)),
+      withReadRetry(() => listOddsBoardCachesByKeys(boardKeys))
     ]);
 
     const snapshotsByGameId = getSnapshotsByGameId(snapshots);
@@ -526,7 +597,7 @@ export async function POST(req: NextRequest) {
     const updates: Array<{ pick: PickClvCaptureRow; input: PickClvUpdateInput }> = [];
 
     for (const pick of picks) {
-      if (!force && readNumber(pick.closing_odds) !== null) {
+      if (!force && hasExistingClvAudit(pick)) {
         rows.push(
           toPreviewRow(
             pick,
@@ -568,12 +639,12 @@ export async function POST(req: NextRequest) {
     }
 
     if (!dryRun && updates.length) {
-      await Promise.all(
-        updates.map(({ pick, input }) => updatePickClvAudit(pick.id, input))
-      );
+      await applyClvUpdates(updates);
     }
 
     const summary = summarizeRows(rows);
+    const skippedExisting = rows.filter((row) => row.action === 'skipped_existing').length;
+    const updateCount = updates.length;
 
     return Response.json(
       {
@@ -581,13 +652,35 @@ export async function POST(req: NextRequest) {
         dryRun,
         force,
         totalPicks: picks.length,
+        alreadyCaptured: skippedExisting,
+        skippedExisting,
+        newlyCaptured: dryRun ? 0 : updateCount,
+        previewedNew: dryRun ? updateCount : 0,
         ...summary,
+        unavailableReasons: groupUnavailableReasons(rows),
         apiCallsMade: 0,
         rows
       },
       { headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (error) {
+    if (isTemporarySupabaseError(error)) {
+      return Response.json(
+        {
+          ok: false,
+          error: 'SUPABASE_TEMPORARY_UNAVAILABLE',
+          message: TEMPORARY_SUPABASE_MESSAGE,
+          retryable: true,
+          apiCallsMade: 0,
+          supabaseErrorCode: getSupabaseErrorCode(error)
+        },
+        {
+          status: 503,
+          headers: { 'Cache-Control': 'no-store' }
+        }
+      );
+    }
+
     return Response.json(
       {
         ok: false,
