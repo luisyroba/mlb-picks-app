@@ -342,6 +342,9 @@ export interface NormalizedProbableStarter {
   handedness?: 'R' | 'L' | 'S';
   whip?: number | null;
   inningsPitched?: number | null;
+  strikeouts?: number | null;
+  walks?: number | null;
+  homeRuns?: number | null;
   strikeoutRate?: number | null;
   walkRate?: number | null;
   hrRate?: number | null;
@@ -640,6 +643,9 @@ function getProbableStarter(
     handedness,
     whip,
     inningsPitched,
+    strikeouts,
+    walks,
+    homeRuns,
     strikeoutRate,
     walkRate,
     hrRate

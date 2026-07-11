@@ -143,6 +143,7 @@ return {
   confidence: scoreResult.confidence,
   lean: scoreResult.lean,
   blockScores: scoreResult.blockScores,
+  scoreBreakdown: scoreResult.breakdown,
   gameScript
 };
 }

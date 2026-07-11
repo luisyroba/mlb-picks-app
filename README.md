@@ -16,6 +16,28 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Slate auto-save
+
+`/api/analyze-slate` analiza todos los juegos pregame de una fecha y dispara el
+auto-guardado cuando la calidad de datos ya es suficiente.
+
+En local puedes probarlo sin secreto:
+
+```bash
+http://localhost:3000/api/analyze-slate?date=20260711&dryRun=1
+```
+
+En producción define `SLATE_ANALYZE_SECRET` como variable de entorno y llama el
+endpoint con:
+
+```bash
+Authorization: Bearer TU_SECRETO
+```
+
+o con `?secret=TU_SECRETO` si lo disparas desde una herramienta simple. El valor
+del secreto no se commitea; va en `.env.local` para local o en el panel de
+variables de entorno del hosting.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

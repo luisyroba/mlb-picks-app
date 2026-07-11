@@ -89,16 +89,6 @@ function getTeamStrengthSubscore(team: TeamCoreStats): number {
   const runDiff = safeNumber(team.runDifferentialPerGame);
   score += runDiff * 18;
 
-  const last10Wins = safeNumber(team.last10Wins);
-  const last10Losses = safeNumber(team.last10Losses);
-  const last10Games = last10Wins + last10Losses;
-  const last10Pct = last10Games > 0 ? last10Wins / last10Games : 0.5;
-  score += (last10Pct - 0.5) * 60;
-
-  const streakCount = safeNumber(team.streakCount);
-  if (team.streakType === 'W') score += streakCount * 3;
-  if (team.streakType === 'L') score -= streakCount * 3;
-
   if (team.isHome) {
     const hw = safeNumber(team.homeWins);
     const hl = safeNumber(team.homeLosses);
@@ -159,7 +149,21 @@ export function scoreStarter(game: NormalizedGameData): number {
         hasNumber(home.strikeoutRate) && hasNumber(away.strikeoutRate)
           ? normalizeDiff(home.strikeoutRate, away.strikeoutRate, 10)
           : null,
-      weight: 0.1
+      weight: 0.08
+    },
+    {
+      value:
+        hasNumber(home.kMinusBbRate) && hasNumber(away.kMinusBbRate)
+          ? normalizeDiff(home.kMinusBbRate, away.kMinusBbRate, 18)
+          : null,
+      weight: 0.08 * advancedReliability
+    },
+    {
+      value:
+        hasNumber(home.whiffRate) && hasNumber(away.whiffRate)
+          ? normalizeDiff(home.whiffRate, away.whiffRate, 12)
+          : null,
+      weight: 0.05 * advancedReliability
     },
     {
       value:
@@ -167,6 +171,20 @@ export function scoreStarter(game: NormalizedGameData): number {
           ? invertNormalizeDiff(home.walkRate, away.walkRate, 5)
           : null,
       weight: 0.05
+    },
+    {
+      value:
+        hasNumber(home.babip) && hasNumber(away.babip)
+          ? invertNormalizeDiff(home.babip, away.babip, 0.08)
+          : null,
+      weight: 0.035 * advancedReliability
+    },
+    {
+      value:
+        hasNumber(home.pitchesPerInning) && hasNumber(away.pitchesPerInning)
+          ? invertNormalizeDiff(home.pitchesPerInning, away.pitchesPerInning, 4)
+          : null,
+      weight: 0.035 * advancedReliability
     },
     {
       value:
@@ -263,7 +281,7 @@ export function scoreOffense(game: NormalizedGameData): number {
         hasNumber(home.runsPerGame) && hasNumber(away.runsPerGame)
           ? normalizeDiff(home.runsPerGame, away.runsPerGame, 3.0)
           : null,
-      weight: 0.24
+      weight: 0.26
     },
     {
       value:
@@ -291,7 +309,7 @@ export function scoreOffense(game: NormalizedGameData): number {
         hasNumber(home.last7RunsPerGame) && hasNumber(away.last7RunsPerGame)
           ? normalizeDiff(home.last7RunsPerGame, away.last7RunsPerGame, 3.0)
           : null,
-      weight: 0.14
+      weight: 0.08
     },
     {
       value: (() => {
@@ -320,7 +338,7 @@ export function scoreOffense(game: NormalizedGameData): number {
         hasNumber(home.last14RunsPerGame) && hasNumber(away.last14RunsPerGame)
           ? normalizeDiff(home.last14RunsPerGame, away.last14RunsPerGame, 3.0)
           : null,
-      weight: 0.1
+      weight: 0.06
     }
   ], -75, 75);
   return score;

@@ -4,6 +4,7 @@ import {
   BlockScores,
   NormalizedGameData,
   PregameScoreResult,
+  ScoreBreakdownEntry,
   WeightProfile,
   WeightProfileName
 } from './types';
@@ -31,6 +32,23 @@ function weightedScore(blockScores: BlockScores, weights: WeightProfile): number
   );
 }
 
+function buildScoreBreakdown(
+  blockScores: BlockScores,
+  weights: WeightProfile
+): ScoreBreakdownEntry[] {
+  return (Object.keys(weights) as Array<keyof WeightProfile>).map((block) => {
+    const score = blockScores[block];
+    const weight = weights[block];
+
+    return {
+      block,
+      score,
+      weight,
+      contribution: Number((score * weight).toFixed(3))
+    };
+  });
+}
+
 export function calculatePregameScore(
   game: NormalizedGameData,
   profileName: WeightProfileName = DEFAULT_WEIGHT_PROFILE
@@ -40,6 +58,7 @@ export function calculatePregameScore(
 
   const blockScores = getAllBlockScores(game);
   const finalScore = clampScore(weightedScore(blockScores, weights));
+  const breakdown = buildScoreBreakdown(blockScores, weights);
 
   const lean =
     finalScore > 0 ? 'home' :
@@ -57,6 +76,7 @@ export function calculatePregameScore(
     profile: profileName,
     weights,
     blockScores,
+    breakdown,
     finalScore,
     lean,
     confidence
@@ -78,6 +98,7 @@ export function calculatePregameScoreFromBlocks(
   const weights = normalizeWeights(rawProfile);
 
   const finalScore = clampScore(weightedScore(blockScores, weights));
+  const breakdown = buildScoreBreakdown(blockScores, weights);
 
   const lean =
     finalScore > 0 ? 'home' :
@@ -95,6 +116,7 @@ export function calculatePregameScoreFromBlocks(
     profile: profileName,
     weights,
     blockScores,
+    breakdown,
     finalScore,
     lean,
     confidence

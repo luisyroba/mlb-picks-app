@@ -664,6 +664,25 @@ export function isConfirmedPickRecord(
   return Boolean(executionSelection || executionMarket || executionOdds);
 }
 
+export function isPendingManualOddsPickRecord(
+  pick: Partial<PickRow> | Record<string, unknown> | null | undefined
+): boolean {
+  if (!pick || isNoBetLikePickRecord(pick) || isConfirmedPickRecord(pick)) {
+    return false;
+  }
+
+  const status = 'status' in pick ? String(pick.status ?? '') : '';
+  const market = readPickString('market' in pick ? pick.market : undefined);
+
+  return status === 'pending' && market.toUpperCase() === 'F5';
+}
+
+export function isTrackablePickRecord(
+  pick: Partial<PickRow> | Record<string, unknown> | null | undefined
+): boolean {
+  return isConfirmedPickRecord(pick) || isPendingManualOddsPickRecord(pick);
+}
+
 export async function saveMarketSnapshot(
   snapshot: MarketSnapshotInput
 ) {
@@ -1262,7 +1281,7 @@ export async function listConfirmedPicksForLedger(
     .from('picks')
     .select(PICK_LEDGER_COLUMNS)
     .eq('sport', 'MLB')
-    .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void)')
+    .or('execution_selection.not.is.null,execution_market.not.is.null,execution_odds.not.is.null,status.in.(won,lost,void),market.eq.F5')
     .order('updated_at', { ascending: false });
 
   if (normalizedOptions.startDate) {
@@ -1285,7 +1304,7 @@ export async function listConfirmedPicksForLedger(
     ? assertRowArray<PickLedgerRow>(data, 'ledger pick')
     : [];
 
-  return rows.filter((pick) => isConfirmedPickRecord(pick));
+  return rows.filter((pick) => isTrackablePickRecord(pick));
 }
 
 export async function listConfirmedPicksByGameIds(
@@ -1316,7 +1335,7 @@ export async function listConfirmedPickAnalysisByGameIds(
     ? assertRowArray<PickAnalysisSummaryRow>(data, 'pick analysis summary')
     : [];
 
-  return rows.filter((pick) => isConfirmedPickRecord(pick));
+  return rows.filter((pick) => isTrackablePickRecord(pick));
 }
 
 export async function listPendingConfirmedPicks(): Promise<PickRow[]> {

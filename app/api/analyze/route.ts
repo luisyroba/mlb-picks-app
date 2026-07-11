@@ -1,6 +1,6 @@
 // app/api/analyze/route.ts
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { getOriginHint, jsonResponseWithAudit } from '@/lib/api-egress-audit';
 import { getNormalizedEspnMlbGame } from '@/lib/espn';
 import { mapEspnToEngineGame } from '@/lib/map-espn-to-engine';
@@ -22,6 +22,9 @@ import {
   mapEventMarketLinesToGameOdds
 } from '@/lib/market-lines';
 import { buildAuditMetrics } from '@/lib/audit-metrics';
+import { getDataQualitySummary } from '@/lib/data-quality';
+import { applyTotalPitchingGuardrails } from '@/lib/pick-guardrails';
+import { repricePickMetrics } from '@/lib/pick-pricing';
 import {
   saveMarketSnapshot,
   getLatestMarketSnapshot,
@@ -569,6 +572,112 @@ function logAnalyzeDebug(input: {
   console.warn('[analyze-debug]', input);
 }
 
+function serializeStarterForDebug(starter: ReturnType<typeof mapEspnToEngineGame>['homeTeam']['starter']) {
+  return {
+    playerId: starter.playerId,
+    name: starter.name,
+    era: starter.era,
+    fip: starter.fip,
+    xfip: starter.xfip,
+    whip: starter.whip,
+    inningsPitched: starter.inningsPitched,
+    strikeouts: starter.strikeouts,
+    walks: starter.walks,
+    homeRuns: starter.homeRuns,
+    strikeoutRate: starter.strikeoutRate,
+    walkRate: starter.walkRate,
+    hrRate: starter.hrRate,
+    whiffRate: starter.whiffRate,
+    kMinusBbRate: starter.kMinusBbRate,
+    babip: starter.babip,
+    flyBallRate: starter.flyBallRate,
+    pitchesPerInning: starter.pitchesPerInning,
+    source: starter.source,
+    sourceOk: starter.sourceOk,
+    invalidReason: starter.invalidReason
+  };
+}
+
+function logStarterEspnRaw(
+  espnGame: Awaited<ReturnType<typeof getNormalizedEspnMlbGame>>
+) {
+  for (const [side, team] of [
+    ['home', espnGame.homeTeam],
+    ['away', espnGame.awayTeam]
+  ] as const) {
+    const starter = team.probableStarter;
+
+    console.warn('[starter-espn-raw]', {
+      gameId: espnGame.gameId,
+      side,
+      team: team.displayName,
+      espnProbableName: starter?.name,
+      espnProbablePlayerId: starter?.playerId,
+      espnEra: starter?.era,
+      espnWhip: starter?.whip,
+      espnIp: starter?.inningsPitched,
+      espnK: starter?.strikeouts,
+      espnBb: starter?.walks,
+      espnHr: starter?.homeRuns
+    });
+  }
+}
+
+function logStarterEngineState(
+  label: '[starter-engine-before-mlb]' | '[starter-engine-after-mlb]',
+  game: ReturnType<typeof mapEspnToEngineGame>
+) {
+  console.warn(label, {
+    gameId: game.gameId,
+    homeStarter: serializeStarterForDebug(game.homeTeam.starter),
+    awayStarter: serializeStarterForDebug(game.awayTeam.starter)
+  });
+}
+
+function getStarterIntegrity(starter: ReturnType<typeof mapEspnToEngineGame>['homeTeam']['starter']) {
+  const hasIdentity = Boolean(starter.name && starter.name !== 'TBD');
+  const hasCoreStats =
+    typeof starter.era === 'number' &&
+    Number.isFinite(starter.era) &&
+    typeof starter.whip === 'number' &&
+    Number.isFinite(starter.whip) &&
+    typeof starter.inningsPitched === 'number' &&
+    Number.isFinite(starter.inningsPitched);
+  const valid = Boolean(starter.sourceOk && hasIdentity && hasCoreStats);
+
+  return {
+    finalName: starter.name,
+    finalEra: starter.era,
+    finalWhip: starter.whip,
+    finalIp: starter.inningsPitched,
+    finalSource: starter.source,
+    valid,
+    invalidReason:
+      valid
+        ? undefined
+        : starter.invalidReason ??
+          (!hasIdentity
+            ? 'missing starter identity'
+            : !hasCoreStats
+              ? 'missing ERA/WHIP/IP'
+              : 'source marked not ok')
+  };
+}
+
+function logStarterIntegrity(game: ReturnType<typeof mapEspnToEngineGame>) {
+  for (const [side, team] of [
+    ['home', game.homeTeam],
+    ['away', game.awayTeam]
+  ] as const) {
+    console.warn('[starter-integrity]', {
+      gameId: game.gameId,
+      side,
+      team: team.core.teamName,
+      ...getStarterIntegrity(team.starter)
+    });
+  }
+}
+
 async function getNormalizedMarketLinesForBoard(
   boardKey: string,
   window: OddsBoardWindow,
@@ -852,6 +961,29 @@ function isGameStarted(
   }
 
   return false;
+}
+
+function deriveGameDay(
+  startTime?: string | null,
+  fallback?: string | null
+): string | null {
+  if (startTime) {
+    const normalized = startTime.includes('T')
+      ? startTime
+      : startTime.replace(' ', 'T');
+    const date = new Date(normalized);
+
+    if (Number.isFinite(date.getTime())) {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: USER_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).format(date);
+    }
+  }
+
+  return fallback ?? null;
 }
 
 function mapFinalPickToExecutionInput(
@@ -1517,6 +1649,7 @@ function buildAnalyzePayload(
     edge: finalPick.edge ?? null,
     ev: finalPick.ev ?? null
   });
+  const dataQuality = getDataQualitySummary(engineGame);
   const normalizedExecutionRecommendation = executionRecommendation
     ? {
         ...executionRecommendation,
@@ -1532,6 +1665,7 @@ function buildAnalyzePayload(
     engineGame,
     blockScores: layerA.blockScores,
     layerA,
+    dataQuality,
     marketCandidates,
     marketView,
     finalDecision,
@@ -1546,6 +1680,7 @@ function buildAnalyzePayload(
       pregameScore: roundScore(layerA.pregameScore),
       lean: layerA.lean,
       confidence: layerA.confidence,
+      scoreBreakdown: layerA.scoreBreakdown ?? null,
 
       marketView: marketView
         ? {
@@ -1745,6 +1880,13 @@ function shouldSyncConfirmedPickCanonicalFields(
     return false;
   }
 
+  const expectedMetrics = repricePickMetrics({
+    estimatedProbability: finalPick.estimatedProbability ?? null,
+    odds: pick.execution_odds ?? finalPick.odds ?? null,
+    edge: finalPick.edge ?? null,
+    ev: finalPick.ev ?? null
+  });
+
   return (
     safeString(pick.market).toUpperCase() !== finalPick.market.toUpperCase() ||
     normalizeEntityName(safeString(pick.selection)) !== normalizeEntityName(finalPick.selection) ||
@@ -1752,10 +1894,36 @@ function shouldSyncConfirmedPickCanonicalFields(
     !sameNumericValue(pick.odds, finalPick.odds ?? null) ||
     safeString(pick.confidence) !== finalPick.confidence ||
     !sameNumericValue(pick.estimated_probability, finalPick.estimatedProbability ?? null) ||
-    !sameNumericValue(pick.implied_probability, finalPick.impliedProbability ?? null) ||
-    !sameNumericValue(pick.edge, finalPick.edge ?? null) ||
-    !sameNumericValue(pick.ev, finalPick.ev ?? null)
+    !sameNumericValue(pick.implied_probability, expectedMetrics.impliedProbability) ||
+    !sameNumericValue(pick.edge, expectedMetrics.edge) ||
+    !sameNumericValue(pick.ev, expectedMetrics.ev)
   );
+}
+
+function isSettledPickRecord(
+  pick: Awaited<ReturnType<typeof getLatestPickForGame>>
+): boolean {
+  const status = safeString(pick?.status).toLowerCase();
+  return status === 'won' || status === 'lost' || status === 'void';
+}
+
+function shouldAutoPersistCurrentPick(
+  pick: Awaited<ReturnType<typeof getLatestPickForGame>>,
+  finalPick: ReturnType<typeof chooseBestPick>,
+  dataQuality: ReturnType<typeof getDataQualitySummary>
+): boolean {
+  if (finalPick.market === 'PASS') return false;
+  if (!dataQuality.autoSaveReady) return false;
+  if (!pick) return true;
+  if (isSettledPickRecord(pick)) return false;
+  if (isConfirmedPickRecord(pick)) return false;
+  return true;
+}
+
+function isF5PickPendingManualOdds(
+  finalPick: ReturnType<typeof chooseBestPick>
+): boolean {
+  return finalPick.market === 'F5';
 }
 
 function buildResultSummaryFromPick(
@@ -2086,6 +2254,7 @@ export async function GET(req: NextRequest) {
     }
 
     const espnGame = await getNormalizedEspnMlbGame(gameId);
+    logStarterEspnRaw(espnGame);
 
     if (isGameStarted(espnGame.status, espnGame.date)) {
       const finalSnapshot = await getOrCreateFinalLockedSnapshot(
@@ -2151,6 +2320,7 @@ export async function GET(req: NextRequest) {
     }
 
     let engineGame = mapEspnToEngineGame(espnGame);
+    logStarterEngineState('[starter-engine-before-mlb]', engineGame);
     let statsFetchWarning: string | null = null;
 
     try {
@@ -2162,6 +2332,8 @@ export async function GET(req: NextRequest) {
       statsFetchWarning =
         error instanceof Error ? error.message : 'Unknown MLB stats error';
     }
+    logStarterEngineState('[starter-engine-after-mlb]', engineGame);
+    logStarterIntegrity(engineGame);
 
     let matchingMarketEvent: ReturnType<typeof findMatchingMarketEvent> = null;
     let oddsFetchWarning: string | null = null;
@@ -2366,9 +2538,14 @@ export async function GET(req: NextRequest) {
       finalPick,
       executionRecommendation
     );
-    const guardedFinalPick = applyAdverseMarketGuard(
+    const marketGuardedFinalPick = applyAdverseMarketGuard(
       resolvedFinalPick,
       engineGame
+    );
+    const guardedFinalPick = applyTotalPitchingGuardrails(
+      marketGuardedFinalPick,
+      engineGame,
+      layerA
     );
     const guardedAuditMetrics = buildAuditMetrics({
       estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
@@ -2381,6 +2558,7 @@ export async function GET(req: NextRequest) {
       guardedFinalPick.market === 'PASS'
         ? null
         : executionRecommendation;
+    const dataQuality = getDataQualitySummary(engineGame);
 
     const marketView = buildMarketView(
       marketCandidates,
@@ -2451,6 +2629,84 @@ export async function GET(req: NextRequest) {
       statsFetchWarning = statsFetchWarning ?? message;
     }
 
+    let autoPersistAlert: string | null = null;
+
+    if (shouldAutoPersistCurrentPick(latestPick, guardedFinalPick, dataQuality)) {
+      const f5NeedsManualOdds = isF5PickPendingManualOdds(guardedFinalPick);
+      const autoMetrics = repricePickMetrics({
+        estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+        odds: guardedFinalPick.odds ?? null,
+        edge: guardedFinalPick.edge ?? null,
+        ev: guardedFinalPick.ev ?? null
+      });
+
+      try {
+        latestPick = await upsertPickRecord({
+          gameDay: deriveGameDay(engineGame.startTime, latestPick?.game_day ?? null),
+          gameId,
+          snapshotId: saved?.snapshot.id ?? latestPick?.snapshot_id ?? null,
+          snapshotStage:
+            saved?.stage ??
+            (latestPick?.snapshot_stage === 'open' ||
+            latestPick?.snapshot_stage === 'mid' ||
+            latestPick?.snapshot_stage === 'final'
+              ? latestPick.snapshot_stage
+              : null),
+          sport: 'MLB',
+          market: guardedFinalPick.market,
+          selection: guardedFinalPick.selection,
+          line: guardedFinalPick.line ?? null,
+          odds: guardedFinalPick.odds ?? null,
+          confidence: guardedFinalPick.confidence,
+          estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+          impliedProbability: roundMetric(autoMetrics.impliedProbability),
+          edge: roundMetric(autoMetrics.edge),
+          ev: roundMetric(autoMetrics.ev),
+          pRaw: roundMetric(autoMetrics.pRaw),
+          pCalibrated: roundMetric(autoMetrics.pCalibrated),
+          edgeRaw: roundMetric(autoMetrics.edgeRaw),
+          edgeCalibrated: roundMetric(autoMetrics.edgeCalibrated),
+          evRaw: roundMetric(autoMetrics.evRaw),
+          evCalibrated: roundMetric(autoMetrics.evCalibrated),
+          reason: guardedFinalPick.executionReason,
+          altMarket1: guardedFinalPick.altMarket1 ?? null,
+          altMarket2: guardedFinalPick.altMarket2 ?? null,
+          executionMarket: f5NeedsManualOdds ? null : guardedFinalPick.market,
+          executionSelection: f5NeedsManualOdds ? null : guardedFinalPick.selection,
+          executionLine: f5NeedsManualOdds ? null : guardedFinalPick.line ?? null,
+          executionOdds: f5NeedsManualOdds ? null : roundOdds(guardedFinalPick.odds),
+          executionSide:
+            f5NeedsManualOdds
+              ? null
+              : effectiveExecutionRecommendation?.recommendedLine?.side ??
+                executionInput?.preferredSide ??
+                null,
+          executionReason: f5NeedsManualOdds
+            ? 'Pick F5 guardado pendiente de confirmar cuota manual'
+            : 'Pick guardado automaticamente con la cuota disponible del proveedor',
+          status: 'pending',
+          result: null,
+          profitUnits: null
+        });
+        autoPersistAlert = f5NeedsManualOdds
+          ? 'Pick F5 guardado pendiente de confirmar cuota manual.'
+          : 'Pick guardado automaticamente con la cuota disponible del proveedor.';
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Unknown Supabase auto-persist pick error';
+
+        statsFetchWarning = statsFetchWarning ?? message;
+      }
+    }
+
+    const autoPersistDeferredAlert =
+      guardedFinalPick.market !== 'PASS' &&
+      !dataQuality.autoSaveReady &&
+      !isSettledPickRecord(latestPick) &&
+      !isConfirmedPickRecord(latestPick)
+        ? `Auto-save diferido: faltan ${dataQuality.missingCritical.length ? dataQuality.missingCritical.join(', ') : dataQuality.missing.slice(0, 3).join(', ')}.`
+        : null;
+
     let pendingPickResetAlert: string | null = null;
     const pendingPickResetReason = resolvePendingPickResetReason(
       latestPick,
@@ -2514,6 +2770,13 @@ export async function GET(req: NextRequest) {
       latestPick &&
       shouldSyncConfirmedPickCanonicalFields(latestPick, guardedFinalPick)
     ) {
+      const syncMetrics = repricePickMetrics({
+        estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+        odds: latestPick.execution_odds ?? guardedFinalPick.odds ?? null,
+        edge: guardedFinalPick.edge ?? null,
+        ev: guardedFinalPick.ev ?? null
+      });
+
       try {
         latestPick = await upsertPickRecord({
           gameDay: latestPick.game_day,
@@ -2533,15 +2796,15 @@ export async function GET(req: NextRequest) {
           odds: guardedFinalPick.odds ?? null,
           confidence: guardedFinalPick.confidence,
           estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
-          impliedProbability: guardedFinalPick.impliedProbability ?? null,
-          edge: guardedFinalPick.edge ?? null,
-          ev: guardedFinalPick.ev ?? null,
-          pRaw: guardedAuditMetrics.p_raw,
-          pCalibrated: guardedAuditMetrics.p_calibrated,
-          edgeRaw: guardedAuditMetrics.edge_raw,
-          edgeCalibrated: guardedAuditMetrics.edge_calibrated,
-          evRaw: guardedAuditMetrics.ev_raw,
-          evCalibrated: guardedAuditMetrics.ev_calibrated,
+          impliedProbability: roundMetric(syncMetrics.impliedProbability),
+          edge: roundMetric(syncMetrics.edge),
+          ev: roundMetric(syncMetrics.ev),
+          pRaw: roundMetric(syncMetrics.pRaw),
+          pCalibrated: roundMetric(syncMetrics.pCalibrated),
+          edgeRaw: roundMetric(syncMetrics.edgeRaw),
+          edgeCalibrated: roundMetric(syncMetrics.edgeCalibrated),
+          evRaw: roundMetric(syncMetrics.evRaw),
+          evCalibrated: roundMetric(syncMetrics.evCalibrated),
           reason: guardedFinalPick.executionReason,
           altMarket1: guardedFinalPick.altMarket1 ?? null,
           altMarket2: guardedFinalPick.altMarket2 ?? null,
@@ -2571,6 +2834,8 @@ export async function GET(req: NextRequest) {
 
     const responseAlerts = [
       ...(saved?.alerts ?? []),
+      ...(autoPersistAlert ? [autoPersistAlert] : []),
+      ...(autoPersistDeferredAlert ? [autoPersistDeferredAlert] : []),
       ...(pendingPickResetAlert ? [pendingPickResetAlert] : [])
     ];
 

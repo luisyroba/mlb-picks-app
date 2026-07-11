@@ -7,28 +7,28 @@ export const FULL_GAME_SIDE: WeightProfile = {
   bullpen: 16,
   offense: 18,
   parkWeather: 10,
-  teamStrength: 10,
-  lineupContext: 10,
+  teamStrength: 8,
+  lineupContext: 12,
   marketContextLight: 8
 };
 
 export const F5_SIDE: WeightProfile = {
-  starter: 40,
-  bullpen: 8,
-  offense: 22,
-  parkWeather: 10,
-  teamStrength: 8,
-  lineupContext: 8,
+  starter: 44,
+  bullpen: 4,
+  offense: 20,
+  parkWeather: 8,
+  teamStrength: 6,
+  lineupContext: 14,
   marketContextLight: 4
 };
 
 export const TOTAL_MARKET: WeightProfile = {
-  starter: 22,
+  starter: 26,
   bullpen: 18,
-  offense: 20,
-  parkWeather: 22,
-  teamStrength: 8,
-  lineupContext: 6,
+  offense: 18,
+  parkWeather: 24,
+  teamStrength: 2,
+  lineupContext: 8,
   marketContextLight: 4
 };
 

@@ -52,6 +52,7 @@ export interface TeamCoreStats {
 }
 
 export interface StartingPitcherStats {
+  playerId?: string;
   name?: string;
   handedness?: 'R' | 'L' | 'S';
 
@@ -63,14 +64,27 @@ export interface StartingPitcherStats {
   inningsPitched?: number;
   expectedInnings?: number;
 
+  strikeouts?: number;
+  walks?: number;
+  homeRuns?: number;
+
   strikeoutRate?: number;
   walkRate?: number;
   hrRate?: number;
+  whiffRate?: number;
+  kMinusBbRate?: number;
+  babip?: number;
+  flyBallRate?: number;
+  pitchesPerInning?: number;
 
   recentEra?: number;
   recentWhip?: number;
 
   status?: 'confirmed' | 'probable' | 'unknown';
+  source?: 'mlb_schedule_probable' | 'espn_probable' | 'unknown';
+  sourceLabel?: string;
+  sourceOk?: boolean;
+  invalidReason?: string;
 }
 
 export interface BullpenStats {
@@ -225,6 +239,7 @@ export interface PregameScoreResult {
   profile: WeightProfileName;
   weights: WeightProfile;
   blockScores: BlockScores;
+  breakdown?: ScoreBreakdownEntry[];
   finalScore: number; // -100 a 100
   lean: 'home' | 'away' | 'neutral';
   confidence: 'low' | 'medium' | 'high';
@@ -246,7 +261,15 @@ export interface LayerAOutput {
   confidence: 'low' | 'medium' | 'high';
   lean: 'home' | 'away' | 'neutral';
   blockScores: BlockScores;
+  scoreBreakdown?: ScoreBreakdownEntry[];
   gameScript: GameScriptOutput;
+}
+
+export interface ScoreBreakdownEntry {
+  block: keyof BlockScores;
+  score: number;
+  weight: number;
+  contribution: number;
 }
 
 export interface MarketEvaluation {
@@ -307,6 +330,7 @@ export interface FinalPickDecision {
     recalculatedPregameScore?: number;
     candidateCountBeforeRecalc?: number;
     candidateCountAfterRecalc?: number;
+    recalculatedScoreBreakdown?: ScoreBreakdownEntry[];
   };
 }
 

@@ -364,12 +364,19 @@ export function mapEspnToEngineGame(
       },
 
       starter: {
+        playerId: espnGame.homeTeam.probableStarter?.playerId || undefined,
         name: espnGame.homeTeam.probableStarter?.name ?? 'TBD',
         handedness: espnGame.homeTeam.probableStarter?.handedness,
         era: homeStarterEra,
         whip: espnGame.homeTeam.probableStarter?.whip ?? undefined,
         inningsPitched:
           espnGame.homeTeam.probableStarter?.inningsPitched ?? undefined,
+        strikeouts:
+          espnGame.homeTeam.probableStarter?.strikeouts ?? undefined,
+        walks:
+          espnGame.homeTeam.probableStarter?.walks ?? undefined,
+        homeRuns:
+          espnGame.homeTeam.probableStarter?.homeRuns ?? undefined,
         strikeoutRate:
           espnGame.homeTeam.probableStarter?.strikeoutRate ?? undefined,
         walkRate:
@@ -377,7 +384,20 @@ export function mapEspnToEngineGame(
         hrRate:
           espnGame.homeTeam.probableStarter?.hrRate ?? undefined,
         expectedInnings: homeExpectedInnings,
-        status: espnGame.homeTeam.probableStarter ? 'probable' : 'unknown'
+        status: espnGame.homeTeam.probableStarter ? 'probable' : 'unknown',
+        source: espnGame.homeTeam.probableStarter ? 'espn_probable' : 'unknown',
+        sourceLabel: espnGame.homeTeam.probableStarter
+          ? 'ESPN competitor.probables'
+          : 'No probable starter',
+        sourceOk: Boolean(
+          espnGame.homeTeam.probableStarter &&
+          homeStarterEra !== undefined &&
+          espnGame.homeTeam.probableStarter.whip !== null &&
+          espnGame.homeTeam.probableStarter.whip !== undefined
+        ),
+        invalidReason: espnGame.homeTeam.probableStarter
+          ? undefined
+          : 'ESPN did not provide a probable starter'
       },
 
       bullpen: {
@@ -441,12 +461,19 @@ export function mapEspnToEngineGame(
       },
 
       starter: {
+        playerId: espnGame.awayTeam.probableStarter?.playerId || undefined,
         name: espnGame.awayTeam.probableStarter?.name ?? 'TBD',
         handedness: espnGame.awayTeam.probableStarter?.handedness,
         era: awayStarterEra,
         whip: espnGame.awayTeam.probableStarter?.whip ?? undefined,
         inningsPitched:
           espnGame.awayTeam.probableStarter?.inningsPitched ?? undefined,
+        strikeouts:
+          espnGame.awayTeam.probableStarter?.strikeouts ?? undefined,
+        walks:
+          espnGame.awayTeam.probableStarter?.walks ?? undefined,
+        homeRuns:
+          espnGame.awayTeam.probableStarter?.homeRuns ?? undefined,
         strikeoutRate:
           espnGame.awayTeam.probableStarter?.strikeoutRate ?? undefined,
         walkRate:
@@ -454,7 +481,20 @@ export function mapEspnToEngineGame(
         hrRate:
           espnGame.awayTeam.probableStarter?.hrRate ?? undefined,
         expectedInnings: awayExpectedInnings,
-        status: espnGame.awayTeam.probableStarter ? 'probable' : 'unknown'
+        status: espnGame.awayTeam.probableStarter ? 'probable' : 'unknown',
+        source: espnGame.awayTeam.probableStarter ? 'espn_probable' : 'unknown',
+        sourceLabel: espnGame.awayTeam.probableStarter
+          ? 'ESPN competitor.probables'
+          : 'No probable starter',
+        sourceOk: Boolean(
+          espnGame.awayTeam.probableStarter &&
+          awayStarterEra !== undefined &&
+          espnGame.awayTeam.probableStarter.whip !== null &&
+          espnGame.awayTeam.probableStarter.whip !== undefined
+        ),
+        invalidReason: espnGame.awayTeam.probableStarter
+          ? undefined
+          : 'ESPN did not provide a probable starter'
       },
 
       bullpen: {

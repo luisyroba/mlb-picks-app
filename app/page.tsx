@@ -9,7 +9,15 @@ import {
 } from '@/lib/runtime-config';
 import { isGameLive, isPregameGame } from '@/lib/game-feed';
 import { normalizeEntityName } from '@/lib/text-utils';
-import type { LayerAOutput, NormalizedGameData } from '@/lib/types';
+import {
+  getDataQualitySummary as getSharedDataQualitySummary,
+  type DataQualitySummary
+} from '@/lib/data-quality';
+import type {
+  LayerAOutput,
+  NormalizedGameData,
+  ScoreBreakdownEntry
+} from '@/lib/types';
 
 type TeamSummary = {
   name: string;
@@ -70,6 +78,7 @@ type AnalyzeResponse = {
   frozenPregame?: boolean;
   engineGame?: NormalizedGameData;
   layerA?: LayerAOutput;
+  dataQuality?: DataQualitySummary;
   pickLock?: { snapshotId?: string; stage: string; lastUpdatedAt: string; alerts: string[] };
   finalDecision?: { status: string; reason: string };
   executionRecommendation?: {
@@ -84,6 +93,7 @@ type AnalyzeResponse = {
     pregameScore: number | null;
     lean: string;
     confidence: string;
+    scoreBreakdown?: ScoreBreakdownEntry[] | null;
     marketView: {
       marketFamily: string;
       selection: string;
@@ -514,7 +524,9 @@ function hasMetric(value: number | null | undefined) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-function getDataQualitySummary(game?: NormalizedGameData | null) {
+function getDataQualitySummary(game: NormalizedGameData) {
+  return getSharedDataQualitySummary(game);
+
   if (!game) {
     return {
       rating: 'bad' as const,
@@ -736,17 +748,52 @@ const STAT_GROUPS: StatGroup[] = [
       },
       {
         id: 'starterKRate',
-        label: 'K rate',
+        label: 'K/9',
         better: 'higher',
         getValue: (team) => normalizeMetricValue(team.starter.strikeoutRate),
+        format: (value) => fmtNum(value, 1)
+      },
+      {
+        id: 'starterXfip',
+        label: 'xFIP',
+        better: 'lower',
+        getValue: (team) => normalizeMetricValue(team.starter.xfip),
+        format: (value) => fmtNum(value, 2)
+      },
+      {
+        id: 'starterKMinusBb',
+        label: 'K-BB%',
+        better: 'higher',
+        getValue: (team) => normalizeMetricValue(team.starter.kMinusBbRate),
         format: (value) => fmtStatPercent(value, 1)
       },
       {
-        id: 'starterRecentEra',
-        label: 'Recent ERA',
+        id: 'starterWhiff',
+        label: 'Whiff%',
+        better: 'higher',
+        getValue: (team) => normalizeMetricValue(team.starter.whiffRate),
+        format: (value) => fmtStatPercent(value, 1)
+      },
+      {
+        id: 'starterBabip',
+        label: 'BABIP',
         better: 'lower',
-        getValue: (team) => normalizeMetricValue(team.starter.recentEra),
-        format: (value) => fmtNum(value, 2)
+        getValue: (team) => normalizeMetricValue(team.starter.babip),
+        format: (value) => fmtNum(value, 3)
+      },
+      {
+        id: 'starterFlyBall',
+        label: 'FB%',
+        better: 'lower',
+        getValue: (team) => normalizeMetricValue(team.starter.flyBallRate),
+        format: (value) => fmtStatPercent(value, 1)
+      },
+      {
+        id: 'starterPitchesPerInning',
+        label: 'P/IP',
+        better: 'lower',
+        getValue: (team) => normalizeMetricValue(team.starter.pitchesPerInning),
+        format: (value) => fmtNum(value, 1)
       }
     ]
   },
@@ -1254,7 +1301,14 @@ const AnalysisModal = memo(function AnalysisModal({
   );
   const activeDescriptor = useMemo(() => (analysis ? getActivePickDescriptor(analysis) : null), [analysis]);
   const noBetExecutionDetail = useMemo(() => getNoBetExecutionDetail(analysis), [analysis]);
-  const dataQuality = useMemo(() => getDataQualitySummary(engineGame), [engineGame]);
+  const dataQuality = useMemo<DataQualitySummary>(
+    () =>
+      analysis?.dataQuality ??
+      (engineGame
+        ? (getDataQualitySummary(engineGame) as DataQualitySummary)
+        : getSharedDataQualitySummary(null)),
+    [analysis?.dataQuality, engineGame]
+  );
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -1517,6 +1571,47 @@ const AnalysisModal = memo(function AnalysisModal({
                     <div className="mb-4 rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 px-3 py-2.5 text-sm text-[var(--ink-soft)]">
                       {dataQuality.detail}
                     </div>
+                    <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                      {dataQuality.checks.length ? (
+                        dataQuality.checks.map((check) => (
+                          <div
+                            key={check.id}
+                            className={`rounded-[1rem] border px-3 py-2 text-xs ${
+                              check.ok
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                : check.critical
+                                  ? 'border-rose-200 bg-rose-50 text-rose-800'
+                                  : 'border-amber-200 bg-amber-50 text-amber-800'
+                            }`}
+                          >
+                            <div className="font-semibold">{check.ok ? 'OK' : 'Falta'}</div>
+                            <div className="mt-0.5 text-[11px]">{check.label}</div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-[1rem] border border-[var(--line-soft)] bg-white/72 px-3 py-2 text-xs text-[var(--ink-soft)]">
+                          Sin checks de cobertura disponibles.
+                        </div>
+                      )}
+                    </div>
+                    {analysis?.uiSummary?.scoreBreakdown?.length ? (
+                      <div className="mb-4 rounded-[1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 p-3">
+                        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Breakdown de scoring</div>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                          {analysis.uiSummary.scoreBreakdown.map((item) => (
+                            <div key={item.block} className="rounded-[0.9rem] bg-[var(--surface-soft)] px-3 py-2">
+                              <div className="text-[11px] font-semibold uppercase text-[var(--ink-muted)]">{item.block}</div>
+                              <div className="mt-1 text-sm font-semibold text-[var(--ink-strong)]">
+                                {fmtSigned(item.contribution, 2)}
+                              </div>
+                              <div className="text-[11px] text-[var(--ink-soft)]">
+                                score {fmtSigned(item.score, 1)} / peso {(item.weight * 100).toFixed(0)}%
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
                       <div>
                         <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">Contexto</div>

@@ -166,8 +166,7 @@ function starterAdvancedMetricReliability(starter: StartingPitcherStats): number
 function starterRunsAllowed(starter: StartingPitcherStats): number {
   const advancedReliability = starterAdvancedMetricReliability(starter);
   const descriptiveReliability = 1 - advancedReliability;
-
-  return weightedAverage(
+  const baseRunsAllowed = weightedAverage(
     [
       { value: safeNumber(starter.xfip), weight: 0.34 * advancedReliability },
       { value: safeNumber(starter.fip), weight: 0.3 * advancedReliability },
@@ -177,6 +176,24 @@ function starterRunsAllowed(starter: StartingPitcherStats): number {
       { value: whipToRunsAllowed(starter.recentWhip), weight: 0.04 + descriptiveReliability * 0.06 }
     ],
     LEAGUE_STARTER_RA9
+  );
+  const kMinusBb = safeNumber(starter.kMinusBbRate);
+  const whiff = safeNumber(starter.whiffRate);
+  const babip = safeNumber(starter.babip);
+  const pitchesPerInning = safeNumber(starter.pitchesPerInning);
+  const advancedAdjustment = clamp(
+    (kMinusBb !== undefined ? (16 - kMinusBb) * 0.018 : 0) +
+      (whiff !== undefined ? (11 - whiff) * 0.018 : 0) +
+      (babip !== undefined ? (babip - 0.3) * 1.8 : 0) +
+      (pitchesPerInning !== undefined ? (pitchesPerInning - 16.2) * 0.035 : 0),
+    -0.28,
+    0.32
+  );
+
+  return clamp(
+    baseRunsAllowed + advancedAdjustment * advancedReliability,
+    2.45,
+    7.1
   );
 }
 
@@ -270,8 +287,8 @@ function deriveTotalsFromMeans(
 function projectionBiasFromGameScript(
   layerA: LayerAOutput
 ): number {
-  if (layerA.gameScript.scoringProjection === 'high') return 0.42;
-  if (layerA.gameScript.scoringProjection === 'low') return -0.42;
+  if (layerA.gameScript.scoringProjection === 'high') return 0.28;
+  if (layerA.gameScript.scoringProjection === 'low') return -0.28;
   return 0;
 }
 
@@ -407,18 +424,17 @@ export function buildGameDistribution(
     totalsPitchingBias;
 
   const sideBias =
-    clamp(layerA.pregameScore / 100 * 1.05, -1.05, 1.05) * 0.34 +
-    clamp(layerA.blockScores.starter / 100 * 0.55, -0.55, 0.55) * 0.28 +
-    clamp(layerA.blockScores.teamStrength / 100 * 0.3, -0.3, 0.3) * 0.16 +
-    clamp(layerA.blockScores.lineupContext / 100 * 0.24, -0.24, 0.24) * 0.12 +
+    clamp(layerA.blockScores.starter / 100 * 0.55, -0.55, 0.55) * 0.3 +
+    clamp(layerA.blockScores.teamStrength / 100 * 0.22, -0.22, 0.22) * 0.12 +
+    clamp(layerA.blockScores.lineupContext / 100 * 0.26, -0.26, 0.26) * 0.16 +
     clamp(layerA.blockScores.marketContextLight / 100 * 0.16, -0.16, 0.16) * 0.1;
 
   const f5SideBias =
     clamp(layerA.blockScores.starter / 100 * 1.15, -1.15, 1.15) * 0.52 +
-    clamp(layerA.blockScores.offense / 100 * 0.36, -0.36, 0.36) * 0.18 +
-    clamp(layerA.blockScores.lineupContext / 100 * 0.24, -0.24, 0.24) * 0.14 +
+    clamp(layerA.blockScores.offense / 100 * 0.28, -0.28, 0.28) * 0.14 +
+    clamp(layerA.blockScores.lineupContext / 100 * 0.28, -0.28, 0.28) * 0.18 +
     clamp(layerA.blockScores.marketContextLight / 100 * 0.15, -0.15, 0.15) * 0.08 +
-    clamp(layerA.blockScores.teamStrength / 100 * 0.16, -0.16, 0.16) * 0.08;
+    clamp(layerA.blockScores.teamStrength / 100 * 0.1, -0.1, 0.1) * 0.04;
 
   const adjustedTotal = clamp(raw.total + totalBias, 5.4, 12.8);
   const adjustedMargin = clamp(raw.margin * 0.66 + sideBias, -4.8, 4.8);

@@ -13,6 +13,7 @@ import {
 } from '@/lib/choose-best-execution';
 import type { MarketLine } from '@/lib/market-lines';
 import { buildAuditMetrics } from '@/lib/audit-metrics';
+import { repricePickMetrics } from '@/lib/pick-pricing';
 
 function roundOdds(value?: number | null): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -353,6 +354,12 @@ export async function POST(req: NextRequest) {
               altMarket2: existingPick?.alt_market_2 ?? null
             };
           })();
+      const executionMetrics = repricePickMetrics({
+        estimatedProbability: pickContext.estimatedProbability,
+        odds: result.usedOdds ?? pickContext.odds,
+        edge: pickContext.edge,
+        ev: pickContext.ev
+      });
 
       await upsertPickRecord({
         gameId,
@@ -373,15 +380,15 @@ export async function POST(req: NextRequest) {
 
         confidence: pickContext.confidence,
         estimatedProbability: pickContext.estimatedProbability,
-        impliedProbability: roundMetric(pickContext.impliedProbability),
-        edge: roundMetric(pickContext.edge),
-        ev: roundMetric(pickContext.ev),
-        pRaw: roundMetric(pickContext.pRaw),
-        pCalibrated: roundMetric(pickContext.pCalibrated),
-        edgeRaw: roundMetric(pickContext.edgeRaw),
-        edgeCalibrated: roundMetric(pickContext.edgeCalibrated),
-        evRaw: roundMetric(pickContext.evRaw),
-        evCalibrated: roundMetric(pickContext.evCalibrated),
+        impliedProbability: roundMetric(executionMetrics.impliedProbability),
+        edge: roundMetric(executionMetrics.edge),
+        ev: roundMetric(executionMetrics.ev),
+        pRaw: roundMetric(executionMetrics.pRaw),
+        pCalibrated: roundMetric(executionMetrics.pCalibrated),
+        edgeRaw: roundMetric(executionMetrics.edgeRaw),
+        edgeCalibrated: roundMetric(executionMetrics.edgeCalibrated),
+        evRaw: roundMetric(executionMetrics.evRaw),
+        evCalibrated: roundMetric(executionMetrics.evCalibrated),
 
         reason: pickContext.reason,
         altMarket1: pickContext.altMarket1,

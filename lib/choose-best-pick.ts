@@ -192,7 +192,8 @@ export function chooseBestPick(
         ...layerA,
         profileUsed: recalculatedScore.profile,
         pregameScore: recalculatedScore.finalScore,
-        blockScores: recalculatedScore.blockScores
+        blockScores: recalculatedScore.blockScores,
+        scoreBreakdown: recalculatedScore.breakdown
       };
 
       const finalCandidates = evaluateMarkets(game, refreshedLayerA);
@@ -204,7 +205,8 @@ export function chooseBestPick(
         initialPregameScore: layerA.pregameScore,
         recalculatedPregameScore: recalculatedScore.finalScore,
         candidateCountBeforeRecalc: initialCandidates.length,
-        candidateCountAfterRecalc: finalCandidates.length
+        candidateCountAfterRecalc: finalCandidates.length,
+        recalculatedScoreBreakdown: recalculatedScore.breakdown
       };
 
       if (!finalCandidates.length) {

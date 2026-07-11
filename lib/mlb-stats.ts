@@ -38,6 +38,7 @@ type MlbScheduleTeam = {
 
 type MlbScheduleGame = {
   gamePk?: number;
+  gameDate?: string;
   gameType?: string;
   officialDate?: string;
   status?: {
@@ -271,6 +272,17 @@ type LeaguePitchingContext = {
   hrPerFlyBall: number;
 };
 
+type ScheduleGameMatch = {
+  game: MlbScheduleGame;
+  matchedGamePk?: number;
+  expectedHome: string;
+  expectedAway: string;
+  mlbHome: string;
+  mlbAway: string;
+  matchMethod: string;
+  matchOk: boolean;
+};
+
 type OpenMeteoGeocodingResponse = {
   results?: Array<{
     latitude?: number;
@@ -394,7 +406,7 @@ function normalizeAbbreviation(value?: string | null): string {
   return String(value ?? '').trim().toUpperCase();
 }
 
-function toOfficialDate(value?: string | null): string | null {
+function toUtcDateKey(value?: string | null): string | null {
   if (!value) return null;
 
   const date = new Date(value);
@@ -407,6 +419,17 @@ function shiftDate(dateString: string, days: number): string {
   const date = new Date(`${dateString}T12:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function getScheduleCandidateDates(espnDate?: string | null): string[] {
+  const utcDate = toUtcDateKey(espnDate);
+  if (!utcDate) return [];
+
+  return [
+    shiftDate(utcDate, -1),
+    utcDate,
+    shiftDate(utcDate, 1)
+  ].filter((value, index, values) => values.indexOf(value) === index);
 }
 
 function average(values: number[], fallback: number): number {
@@ -474,6 +497,119 @@ function calculateXFip(
     FIP_CONSTANT;
 
   return roundStat(xfip, 2);
+}
+
+function readFirstNumber(
+  stat: StatBucket | undefined,
+  keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = optionalNumber(stat?.[key]);
+    if (value !== undefined) return value;
+  }
+
+  return undefined;
+}
+
+function calculateKMinusBbRate(seasonStat?: StatBucket): number | undefined {
+  const strikeouts = optionalNumber(seasonStat?.strikeOuts);
+  const walks = optionalNumber(seasonStat?.baseOnBalls);
+  const battersFaced = optionalNumber(seasonStat?.battersFaced);
+
+  if (
+    strikeouts === undefined ||
+    walks === undefined ||
+    !battersFaced ||
+    battersFaced <= 0
+  ) {
+    return undefined;
+  }
+
+  return roundStat(((strikeouts - walks) / battersFaced) * 100, 2);
+}
+
+function calculateWhiffRate(
+  seasonStat?: StatBucket,
+  advancedStat?: StatBucket
+): number | undefined {
+  const direct = readFirstNumber(advancedStat, [
+    'whiffRate',
+    'whiffPct',
+    'swingingStrikePercentage',
+    'swingingStrikePct'
+  ]);
+
+  if (direct !== undefined) {
+    return direct > 1 ? roundStat(direct, 2) : roundStat(direct * 100, 2);
+  }
+
+  const swingingStrikes = readFirstNumber(advancedStat, [
+    'swingingStrikes',
+    'swingingStrike',
+    'strikesSwinging'
+  ]);
+  const totalPitches =
+    readFirstNumber(advancedStat, ['totalPitches', 'numberOfPitches', 'pitches']) ??
+    readFirstNumber(seasonStat, ['totalPitches', 'numberOfPitches', 'pitches']);
+
+  if (
+    swingingStrikes === undefined ||
+    !totalPitches ||
+    totalPitches <= 0
+  ) {
+    return undefined;
+  }
+
+  return roundStat((swingingStrikes / totalPitches) * 100, 2);
+}
+
+function calculateFlyBallRate(
+  seasonStat?: StatBucket,
+  advancedStat?: StatBucket
+): number | undefined {
+  const direct = readFirstNumber(advancedStat, ['flyBallRate', 'fbPct']);
+
+  if (direct !== undefined) {
+    return direct > 1 ? roundStat(direct, 2) : roundStat(direct * 100, 2);
+  }
+
+  const flyOuts = optionalNumber(advancedStat?.flyOuts) ?? 0;
+  const flyHits = optionalNumber(advancedStat?.flyHits) ?? 0;
+  const homeRuns =
+    optionalNumber(seasonStat?.homeRuns) ??
+    optionalNumber(advancedStat?.homeRuns) ??
+    0;
+  const groundOuts = optionalNumber(advancedStat?.groundOuts) ?? 0;
+  const lineOuts = optionalNumber(advancedStat?.lineOuts) ?? 0;
+  const popOuts = optionalNumber(advancedStat?.popOuts) ?? 0;
+  const flyBalls = flyOuts + flyHits + homeRuns;
+  const trackedBalls = flyBalls + groundOuts + lineOuts + popOuts;
+
+  if (trackedBalls <= 0) return undefined;
+
+  return roundStat((flyBalls / trackedBalls) * 100, 2);
+}
+
+function calculatePitchesPerInning(
+  seasonStat?: StatBucket,
+  advancedStat?: StatBucket
+): number | undefined {
+  const direct = readFirstNumber(seasonStat, ['pitchesPerInning']);
+
+  if (direct !== undefined) {
+    return roundStat(direct, 2);
+  }
+
+  const totalPitches =
+    readFirstNumber(seasonStat, ['numberOfPitches', 'totalPitches', 'pitches']) ??
+    readFirstNumber(advancedStat, ['numberOfPitches', 'totalPitches', 'pitches']);
+  const inningsPitched = parseInnings(seasonStat?.inningsPitched);
+
+  if (!totalPitches || !inningsPitched || inningsPitched <= 0) {
+    return undefined;
+  }
+
+  return roundStat(totalPitches / inningsPitched, 2);
 }
 
 function getExpectedInningsFromOfficialStat(stat?: StatBucket): number | undefined {
@@ -730,67 +866,116 @@ function getTeamDisplayName(team?: MlbScheduleTeam['team']): string {
   return canonicalizeTeamName(String(team?.name ?? ''));
 }
 
-function findScheduleGameForEspnGame(
-  schedule: MlbScheduleResponse,
+function getScheduleTeamCandidates(team?: MlbScheduleTeam['team']): Set<string> {
+  const candidates = new Set<string>();
+
+  for (const candidate of [
+    getTeamDisplayName(team),
+    team?.name,
+    [team?.locationName, team?.teamName].filter(Boolean).join(' '),
+    [team?.locationName, team?.clubName].filter(Boolean).join(' ')
+  ]) {
+    for (const variant of getCanonicalNameVariants(candidate)) {
+      candidates.add(variant);
+    }
+  }
+
+  return candidates;
+}
+
+function getTeamPairMatchMethod(
+  game: MlbScheduleGame,
   espnGame: EspnNormalizedGameData
-): MlbScheduleGame | null {
+): string | null {
   const expectedHome = getCanonicalNameVariants(espnGame.homeTeam.displayName);
   const expectedAway = getCanonicalNameVariants(espnGame.awayTeam.displayName);
   const expectedHomeAbbr = normalizeAbbreviation(espnGame.homeTeam.abbreviation);
   const expectedAwayAbbr = normalizeAbbreviation(espnGame.awayTeam.abbreviation);
+  const homeTeam = game.teams?.home?.team;
+  const awayTeam = game.teams?.away?.team;
+
+  const homeAbbr = normalizeAbbreviation(homeTeam?.abbreviation);
+  const awayAbbr = normalizeAbbreviation(awayTeam?.abbreviation);
+
+  if (
+    homeAbbr &&
+    awayAbbr &&
+    homeAbbr === expectedHomeAbbr &&
+    awayAbbr === expectedAwayAbbr
+  ) {
+    return 'abbr+closest-start';
+  }
+
+  const homeCandidates = getScheduleTeamCandidates(homeTeam);
+  const awayCandidates = getScheduleTeamCandidates(awayTeam);
+
+  const homeMatches = expectedHome.some((name) => homeCandidates.has(name));
+  const awayMatches = expectedAway.some((name) => awayCandidates.has(name));
+
+  return homeMatches && awayMatches ? 'name+closest-start' : null;
+}
+
+function getStartDeltaMs(game: MlbScheduleGame, espnGame: EspnNormalizedGameData): number {
+  const mlbStartMs = new Date(game.gameDate ?? '').getTime();
+  const espnStartMs = new Date(espnGame.date ?? '').getTime();
+
+  if (!Number.isFinite(mlbStartMs) || !Number.isFinite(espnStartMs)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.abs(mlbStartMs - espnStartMs);
+}
+
+function findScheduleGameForEspnGame(
+  schedule: MlbScheduleResponse,
+  espnGame: EspnNormalizedGameData
+): ScheduleGameMatch | null {
+  let best:
+    | {
+        game: MlbScheduleGame;
+        matchMethod: string;
+        deltaMs: number;
+      }
+    | null = null;
 
   for (const date of schedule.dates ?? []) {
     for (const game of date.games ?? []) {
-      const homeTeam = game.teams?.home?.team;
-      const awayTeam = game.teams?.away?.team;
+      const matchMethod = getTeamPairMatchMethod(game, espnGame);
+      if (!matchMethod) continue;
 
-      const homeAbbr = normalizeAbbreviation(homeTeam?.abbreviation);
-      const awayAbbr = normalizeAbbreviation(awayTeam?.abbreviation);
+      const deltaMs = getStartDeltaMs(game, espnGame);
+      const currentRank = matchMethod.startsWith('abbr') ? 0 : 1;
+      const bestRank = best?.matchMethod.startsWith('abbr') ? 0 : 1;
 
       if (
-        homeAbbr &&
-        awayAbbr &&
-        homeAbbr === expectedHomeAbbr &&
-        awayAbbr === expectedAwayAbbr
+        !best ||
+        deltaMs < best.deltaMs ||
+        (deltaMs === best.deltaMs && currentRank < bestRank)
       ) {
-        return game;
-      }
-
-      const homeCandidates = new Set<string>();
-      const awayCandidates = new Set<string>();
-
-      for (const candidate of [
-        getTeamDisplayName(homeTeam),
-        homeTeam?.name,
-        [homeTeam?.locationName, homeTeam?.teamName].filter(Boolean).join(' '),
-        [homeTeam?.locationName, homeTeam?.clubName].filter(Boolean).join(' ')
-      ]) {
-        for (const variant of getCanonicalNameVariants(candidate)) {
-          homeCandidates.add(variant);
-        }
-      }
-
-      for (const candidate of [
-        getTeamDisplayName(awayTeam),
-        awayTeam?.name,
-        [awayTeam?.locationName, awayTeam?.teamName].filter(Boolean).join(' '),
-        [awayTeam?.locationName, awayTeam?.clubName].filter(Boolean).join(' ')
-      ]) {
-        for (const variant of getCanonicalNameVariants(candidate)) {
-          awayCandidates.add(variant);
-        }
-      }
-
-      const homeMatches = expectedHome.some((name) => homeCandidates.has(name));
-      const awayMatches = expectedAway.some((name) => awayCandidates.has(name));
-
-      if (homeMatches && awayMatches) {
-        return game;
+        best = {
+          game,
+          matchMethod,
+          deltaMs
+        };
       }
     }
   }
 
-  return null;
+  if (!best) return null;
+
+  const homeTeam = best.game.teams?.home?.team;
+  const awayTeam = best.game.teams?.away?.team;
+
+  return {
+    game: best.game,
+    matchedGamePk: best.game.gamePk,
+    expectedHome: espnGame.homeTeam.displayName,
+    expectedAway: espnGame.awayTeam.displayName,
+    mlbHome: homeTeam?.name ?? getTeamDisplayName(homeTeam),
+    mlbAway: awayTeam?.name ?? getTeamDisplayName(awayTeam),
+    matchMethod: best.matchMethod,
+    matchOk: Number.isFinite(best.deltaMs) && best.deltaMs <= 3 * 60 * 60 * 1000
+  };
 }
 
 function getSeasonSplit(
@@ -1471,9 +1656,11 @@ function toStarterHandedness(value?: string | null): 'R' | 'L' | 'S' | undefined
 
 async function getOfficialStarterContext(
   playerId: number,
+  playerName: string | undefined,
   season: string,
-  leaguePitchingContext: LeaguePitchingContext
-): Promise<Partial<StartingPitcherStats>> {
+  leaguePitchingContext: LeaguePitchingContext,
+  fallbackHandedness?: StartingPitcherStats['handedness']
+): Promise<StartingPitcherStats> {
   const json = await fetchMlbJson<MlbPeopleResponse>(
     `${MLB_API_BASE}/people/${playerId}?hydrate=stats(group=[pitching],type=[season,seasonAdvanced],sportId=1,season=${season})`
   );
@@ -1496,9 +1683,15 @@ async function getOfficialStarterContext(
   const strikeoutsPer9 = optionalNumber(seasonStat?.strikeoutsPer9Inn);
   const walksPer9 = optionalNumber(seasonStat?.walksPer9Inn);
   const homeRunsPer9 = optionalNumber(seasonStat?.homeRunsPer9);
+  const sourceOk =
+    optionalNumber(seasonStat?.era) !== undefined &&
+    optionalNumber(seasonStat?.whip) !== undefined &&
+    inningsPitched !== undefined;
 
   return {
-    handedness: toStarterHandedness(person?.pitchHand?.code),
+    playerId: String(playerId),
+    name: person?.fullName ?? playerName ?? 'TBD',
+    handedness: toStarterHandedness(person?.pitchHand?.code) ?? fallbackHandedness,
     era: optionalNumber(seasonStat?.era),
     fip: calculateFip(seasonStat),
     xfip: calculateXFip(
@@ -1509,24 +1702,151 @@ async function getOfficialStarterContext(
     whip: optionalNumber(seasonStat?.whip),
     inningsPitched,
     expectedInnings: getExpectedInningsFromOfficialStat(seasonStat),
+    strikeouts: optionalNumber(seasonStat?.strikeOuts),
+    walks: optionalNumber(seasonStat?.baseOnBalls),
+    homeRuns: optionalNumber(seasonStat?.homeRuns),
     strikeoutRate: strikeoutsPer9,
     walkRate: walksPer9,
-    hrRate: homeRunsPer9
+    hrRate: homeRunsPer9,
+    whiffRate: calculateWhiffRate(seasonStat, advancedStat),
+    kMinusBbRate: calculateKMinusBbRate(seasonStat),
+    babip: optionalNumber(advancedStat?.babip),
+    flyBallRate: calculateFlyBallRate(seasonStat, advancedStat),
+    pitchesPerInning: calculatePitchesPerInning(seasonStat, advancedStat),
+    status: 'probable',
+    source: 'mlb_schedule_probable',
+    sourceLabel: 'MLB schedule probablePitcher + people stats',
+    sourceOk,
+    invalidReason: sourceOk
+      ? undefined
+      : 'MLB people endpoint did not include complete season pitching stats'
   };
 }
 
-function mergeStarter(
+function buildMlbStarterFailure(params: {
+  playerId?: number;
+  playerName?: string;
+  fallbackHandedness?: StartingPitcherStats['handedness'];
+  reason: string;
+}): StartingPitcherStats {
+  return {
+    playerId: params.playerId ? String(params.playerId) : undefined,
+    name: params.playerName ?? 'TBD',
+    handedness: params.fallbackHandedness,
+    status: params.playerId ? 'probable' : 'unknown',
+    source: params.playerId ? 'mlb_schedule_probable' : 'unknown',
+    sourceLabel: params.playerId
+      ? 'MLB schedule probablePitcher'
+      : 'No probable starter',
+    sourceOk: false,
+    invalidReason: params.reason
+  };
+}
+
+function buildEspnStarterFallback(
   current: StartingPitcherStats,
-  incoming: Partial<StartingPitcherStats>
+  reason: string
 ): StartingPitcherStats {
+  const hasStats =
+    optionalNumber(current.era) !== undefined &&
+    optionalNumber(current.whip) !== undefined;
+
   return {
     ...current,
-    ...incoming,
-    status:
-      incoming.name || incoming.era !== undefined || incoming.handedness
-        ? 'probable'
-        : current.status
+    source: current.name && current.name !== 'TBD' ? 'espn_probable' : 'unknown',
+    sourceLabel: current.name && current.name !== 'TBD'
+      ? 'ESPN competitor.probables'
+      : 'No probable starter',
+    sourceOk: hasStats,
+    invalidReason: hasStats ? reason : `${reason}; ESPN starter stats incomplete`
   };
+}
+
+function logOfficialStarterStats(input: {
+  gameId: string;
+  side: 'home' | 'away';
+  team: string;
+  starter: StartingPitcherStats;
+}) {
+  console.warn('[starter-mlb-official-stats]', {
+    gameId: input.gameId,
+    side: input.side,
+    team: input.team,
+    playerId: input.starter.playerId,
+    playerName: input.starter.name,
+    era: input.starter.era,
+    whip: input.starter.whip,
+    inningsPitched: input.starter.inningsPitched,
+    strikeoutRate: input.starter.strikeoutRate,
+    walkRate: input.starter.walkRate,
+    hrRate: input.starter.hrRate,
+    whiffRate: input.starter.whiffRate,
+    kMinusBbRate: input.starter.kMinusBbRate,
+    babip: input.starter.babip,
+    flyBallRate: input.starter.flyBallRate,
+    pitchesPerInning: input.starter.pitchesPerInning,
+    strikeouts: input.starter.strikeouts,
+    walks: input.starter.walks,
+    homeRuns: input.starter.homeRuns,
+    sourceOk: input.starter.sourceOk,
+    invalidReason: input.starter.invalidReason
+  });
+}
+
+async function resolveOfficialStarterContext(params: {
+  gameId: string;
+  side: 'home' | 'away';
+  team: string;
+  playerId?: number;
+  playerName?: string;
+  season: string;
+  leaguePitchingContextPromise: Promise<LeaguePitchingContext>;
+  fallback: StartingPitcherStats;
+}): Promise<StartingPitcherStats> {
+  if (!params.playerId) {
+    const starter = buildEspnStarterFallback(
+      params.fallback,
+      'MLB schedule did not provide probablePitcher.id'
+    );
+    logOfficialStarterStats({
+      gameId: params.gameId,
+      side: params.side,
+      team: params.team,
+      starter
+    });
+    return starter;
+  }
+
+  try {
+    const starter = await getOfficialStarterContext(
+      params.playerId,
+      params.playerName,
+      params.season,
+      await params.leaguePitchingContextPromise,
+      params.fallback.handedness
+    );
+    logOfficialStarterStats({
+      gameId: params.gameId,
+      side: params.side,
+      team: params.team,
+      starter
+    });
+    return starter;
+  } catch (error) {
+    const starter = buildMlbStarterFailure({
+      playerId: params.playerId,
+      playerName: params.playerName,
+      fallbackHandedness: params.fallback.handedness,
+      reason: error instanceof Error ? error.message : 'Unknown MLB people stats error'
+    });
+    logOfficialStarterStats({
+      gameId: params.gameId,
+      side: params.side,
+      team: params.team,
+      starter
+    });
+    return starter;
+  }
 }
 
 function hasPostedLineupPlayers(lineups: unknown, side: 'home' | 'away'): boolean {
@@ -1541,6 +1861,47 @@ function hasPostedLineupPlayers(lineups: unknown, side: 'home' | 'away'): boolea
     const value = record[key];
     return Array.isArray(value) && value.length > 0;
   });
+}
+
+function readNestedPlayerId(value: unknown): number | undefined {
+  if (!value || typeof value !== 'object') {
+    return optionalNumber(value);
+  }
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    optionalNumber(record.id) ??
+    optionalNumber(record.personId) ??
+    optionalNumber(record.playerId) ??
+    optionalNumber((record.person as Record<string, unknown> | undefined)?.id) ??
+    optionalNumber((record.player as Record<string, unknown> | undefined)?.id)
+  );
+}
+
+function extractPostedLineupPlayerIds(
+  lineups: unknown,
+  side: 'home' | 'away'
+): Set<number> {
+  const playerIds = new Set<number>();
+  if (!lineups || typeof lineups !== 'object') return playerIds;
+
+  const record = lineups as Record<string, unknown>;
+  const keys = side === 'home'
+    ? ['homePlayers', 'homeLineup', 'home']
+    : ['awayPlayers', 'awayLineup', 'away'];
+
+  for (const key of keys) {
+    const value = record[key];
+    if (!Array.isArray(value)) continue;
+
+    for (const item of value) {
+      const playerId = readNestedPlayerId(item);
+      if (playerId) playerIds.add(playerId);
+    }
+  }
+
+  return playerIds;
 }
 
 function getHitterQualityScore(hitter: HitterSeasonContext): number {
@@ -1583,11 +1944,16 @@ function buildTeamLineupContext(
   allHitters: HitterSeasonContext[],
   activeHitterIds: Set<number>,
   confirmedLineup: boolean,
-  activePlayerPositions: Map<number, string | undefined>
+  activePlayerPositions: Map<number, string | undefined>,
+  postedLineupIds = new Set<number>()
 ): TeamLineupContext {
   const expectedLineup = selectTopHitters(allHitters, 9);
+  const lineupPoolIds =
+    confirmedLineup && postedLineupIds.size >= 7
+      ? postedLineupIds
+      : activeHitterIds;
   const availableLineup = selectTopHitters(
-    allHitters.filter((hitter) => activeHitterIds.has(hitter.playerId)),
+    allHitters.filter((hitter) => lineupPoolIds.has(hitter.playerId)),
     9
   );
 
@@ -1638,23 +2004,62 @@ export async function enrichEngineGameWithMlbStats(
   baseGame: EngineGame,
   espnGame: EspnNormalizedGameData
 ): Promise<EngineGame> {
-  const officialDate = toOfficialDate(espnGame.date);
-  const season = officialDate?.slice(0, 4) ?? String(new Date().getUTCFullYear());
+  const scheduleCandidateDates = getScheduleCandidateDates(espnGame.date);
+  const season = toUtcDateKey(espnGame.date)?.slice(0, 4) ?? String(new Date().getUTCFullYear());
 
-  if (!officialDate) {
+  if (!scheduleCandidateDates.length) {
     return baseGame;
   }
 
-  const [standingsMap, schedule] = await Promise.all([
+  const [standingsMap, scheduleResults] = await Promise.all([
     safeResolve(getStandingsMap(season), new Map<number, TeamStandingContext>()),
-    fetchMlbJson<MlbScheduleResponse>(
-      `${MLB_API_BASE}/schedule?sportId=1&date=${officialDate}&hydrate=probablePitcher,lineups,team`
+    Promise.all(
+      scheduleCandidateDates.map((date) =>
+        safeResolve(
+          fetchMlbJson<MlbScheduleResponse>(
+            `${MLB_API_BASE}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,lineups,team`
+          ),
+          { dates: [] }
+        )
+      )
     )
   ]);
 
-  const scheduleGame = findScheduleGameForEspnGame(schedule, espnGame);
+  const schedule: MlbScheduleResponse = {
+    dates: scheduleResults.flatMap((result) => result.dates ?? [])
+  };
+  const scheduleMatch = findScheduleGameForEspnGame(schedule, espnGame);
+  const scheduleGame = scheduleMatch?.game ?? null;
 
-  if (!scheduleGame) {
+  console.warn('[starter-mlb-schedule-match]', {
+    gameId: espnGame.gameId,
+    matchedGamePk: scheduleMatch?.matchedGamePk,
+    expectedHome: espnGame.homeTeam.displayName,
+    expectedAway: espnGame.awayTeam.displayName,
+    mlbHome: scheduleMatch?.mlbHome,
+    mlbAway: scheduleMatch?.mlbAway,
+    mlbHomeProbableName: scheduleGame?.teams?.home?.probablePitcher?.fullName,
+    mlbHomeProbableId: scheduleGame?.teams?.home?.probablePitcher?.id,
+    mlbAwayProbableName: scheduleGame?.teams?.away?.probablePitcher?.fullName,
+    mlbAwayProbableId: scheduleGame?.teams?.away?.probablePitcher?.id,
+    matchMethod: scheduleMatch?.matchMethod ?? 'none',
+    matchOk: scheduleMatch?.matchOk ?? false,
+    candidateDates: scheduleCandidateDates,
+    mlbGameDate: scheduleGame?.gameDate,
+    mlbOfficialDate: scheduleGame?.officialDate,
+    espnDate: espnGame.date
+  });
+
+  if (!scheduleGame || scheduleMatch?.matchOk !== true) {
+    return baseGame;
+  }
+
+  const officialDate =
+    scheduleGame.officialDate ??
+    toUtcDateKey(scheduleGame.gameDate) ??
+    toUtcDateKey(espnGame.date);
+
+  if (!officialDate) {
     return baseGame;
   }
 
@@ -1681,7 +2086,10 @@ export async function enrichEngineGameWithMlbStats(
     activePlayerPositions: new Map<number, string | undefined>()
   };
 
-  const leaguePitchingContextPromise = getLeaguePitchingContext(season);
+  const leaguePitchingContextPromise = safeResolve(
+    getLeaguePitchingContext(season),
+    { hrPerFlyBall: 0.105 }
+  );
   const homeBullpenSeasonPromise = getTeamBullpenSeasonStat(homeTeamId, season);
   const awayBullpenSeasonPromise = getTeamBullpenSeasonStat(awayTeamId, season);
 
@@ -1718,22 +2126,26 @@ export async function enrichEngineGameWithMlbStats(
       }),
       null
     ),
-    homeStarterId
-      ? safeResolve(
-          leaguePitchingContextPromise.then((context) =>
-            getOfficialStarterContext(homeStarterId, season, context)
-          ),
-          {}
-        )
-      : Promise.resolve({}),
-    awayStarterId
-      ? safeResolve(
-          leaguePitchingContextPromise.then((context) =>
-            getOfficialStarterContext(awayStarterId, season, context)
-          ),
-          {}
-        )
-      : Promise.resolve({})
+    resolveOfficialStarterContext({
+      gameId: espnGame.gameId,
+      side: 'home',
+      team: baseGame.homeTeam.core.teamName,
+      playerId: homeStarterId,
+      playerName: scheduleGame.teams?.home?.probablePitcher?.fullName,
+      season,
+      leaguePitchingContextPromise,
+      fallback: baseGame.homeTeam.starter
+    }),
+    resolveOfficialStarterContext({
+      gameId: espnGame.gameId,
+      side: 'away',
+      team: baseGame.awayTeam.core.teamName,
+      playerId: awayStarterId,
+      playerName: scheduleGame.teams?.away?.probablePitcher?.fullName,
+      season,
+      leaguePitchingContextPromise,
+      fallback: baseGame.awayTeam.starter
+    })
   ]);
 
   const [homeBullpenSeasonResult, awayBullpenSeasonResult] = await Promise.allSettled([
@@ -1782,17 +2194,27 @@ export async function enrichEngineGameWithMlbStats(
   const awayRestDisadvantage = awayRecent.playedYesterday && !homeRecent.playedYesterday;
   const homeConfirmedLineup = hasPostedLineupPlayers(scheduleGame.lineups, 'home');
   const awayConfirmedLineup = hasPostedLineupPlayers(scheduleGame.lineups, 'away');
+  const homePostedLineupIds = extractPostedLineupPlayerIds(
+    scheduleGame.lineups,
+    'home'
+  );
+  const awayPostedLineupIds = extractPostedLineupPlayerIds(
+    scheduleGame.lineups,
+    'away'
+  );
   const homeLineupContext = buildTeamLineupContext(
     homeHitters.allHitters,
     homeHitters.activeHitterIds,
     homeConfirmedLineup,
-    homeHitters.activePlayerPositions
+    homeHitters.activePlayerPositions,
+    homePostedLineupIds
   );
   const awayLineupContext = buildTeamLineupContext(
     awayHitters.allHitters,
     awayHitters.activeHitterIds,
     awayConfirmedLineup,
-    awayHitters.activePlayerPositions
+    awayHitters.activePlayerPositions,
+    awayPostedLineupIds
   );
 
   return {
@@ -1824,7 +2246,7 @@ export async function enrichEngineGameWithMlbStats(
         runDifferentialPerGame:
           homeStanding?.runDifferentialPerGame ?? baseGame.homeTeam.core.runDifferentialPerGame
       },
-      starter: mergeStarter(baseGame.homeTeam.starter, homeStarter),
+      starter: homeStarter,
       bullpen: resolveBullpenStats({
         teamName: baseGame.homeTeam.core.teamName,
         teamBullpenSeasonStat: homeBullpenSeason,
@@ -1875,7 +2297,7 @@ export async function enrichEngineGameWithMlbStats(
         runDifferentialPerGame:
           awayStanding?.runDifferentialPerGame ?? baseGame.awayTeam.core.runDifferentialPerGame
       },
-      starter: mergeStarter(baseGame.awayTeam.starter, awayStarter),
+      starter: awayStarter,
       bullpen: resolveBullpenStats({
         teamName: baseGame.awayTeam.core.teamName,
         teamBullpenSeasonStat: awayBullpenSeason,
