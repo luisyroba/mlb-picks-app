@@ -88,15 +88,23 @@ export function classifyStarter(starter: StartingPitcherStats): StarterClassific
     (walkRate !== null && walkRate >= 3.8) ||
     (hrRate !== null && hrRate >= 1.35);
 
-  pushReason(reasons, runPreventionElite, 'elite ERA/WHIP');
-  pushReason(reasons, commandElite, 'elite command/K-BB');
-  pushReason(reasons, defenseElite, 'elite FIP/xFIP');
-  pushReason(reasons, descriptiveDisaster, 'disaster run prevention');
-  pushReason(reasons, supportedBad, 'bad profile supported beyond ERA');
-  pushReason(reasons, lowSample, 'low sample');
+  pushReason(reasons, runPreventionElite, 'ERA/WHIP elite');
+  pushReason(reasons, runPreventionStrong && !runPreventionElite, 'ERA/WHIP fuerte');
+  pushReason(reasons, commandElite, 'comando/K-BB elite');
+  pushReason(reasons, commandStrong && !commandElite, 'comando/K-BB fuerte');
+  pushReason(reasons, defenseElite, 'FIP/xFIP elite');
+  pushReason(reasons, defenseStrong && !defenseElite, 'FIP/xFIP fuerte');
+  pushReason(reasons, descriptiveDisaster, 'prevencion de carreras desastrosa');
+  pushReason(
+    reasons,
+    descriptiveBad && !descriptiveDisaster,
+    'ERA/WHIP debil'
+  );
+  pushReason(reasons, supportedBad, 'perfil negativo respaldado mas alla del ERA');
+  if (lowSample) reasons.unshift('muestra insuficiente');
 
   let tier: StarterTier = 'average';
-  if (lowSample && descriptiveBad && !supportedBad) {
+  if (lowSample) {
     tier = 'low_sample_risk';
   } else if (descriptiveDisaster && (supportedBad || reliability >= 0.45)) {
     tier = 'disaster';
@@ -133,7 +141,7 @@ export function classifyStarter(starter: StartingPitcherStats): StarterClassific
     score,
     reliability,
     label,
-    reasons: reasons.length ? reasons : ['league-average profile']
+    reasons: reasons.length ? reasons : ['perfil cercano al promedio de la liga']
   };
 }
 
