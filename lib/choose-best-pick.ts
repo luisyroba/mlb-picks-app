@@ -51,9 +51,16 @@ function toFinalPick(
     odds: best.odds,
 
     estimatedProbability: best.estimatedProbability,
+    rawEstimatedProbability: best.rawEstimatedProbability,
     impliedProbability: best.impliedProbability,
     edge: best.edge,
     ev: best.ev,
+    pRaw: best.pRaw,
+    pCalibrated: best.pCalibrated,
+    edgeRaw: best.edgeRaw,
+    edgeCalibrated: best.edgeCalibrated,
+    evRaw: best.evRaw,
+    evCalibrated: best.evCalibrated,
     selectionScore: best.selectionScore,
 
     confidence: best.confidence,

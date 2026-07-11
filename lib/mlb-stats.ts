@@ -477,9 +477,20 @@ function calculateXFip(
     return undefined;
   }
 
+  const directXfip = readFirstNumber(advancedStat, ['xfip', 'xFip', 'xFIP']);
+  if (directXfip !== undefined) {
+    return roundStat(directXfip, 2);
+  }
+
   const inningsPitched = parseInnings(seasonStat.inningsPitched);
-  const flyOuts = optionalNumber(advancedStat.flyOuts) ?? 0;
-  const flyHits = optionalNumber(advancedStat.flyHits) ?? 0;
+  const directFlyBalls = readFirstNumber(advancedStat, [
+    'flyBalls',
+    'airBalls',
+    'outfieldFlyBalls'
+  ]);
+  const flyOuts =
+    readFirstNumber(advancedStat, ['flyOuts', 'airOuts']) ?? 0;
+  const flyHits = readFirstNumber(advancedStat, ['flyHits']) ?? 0;
   const homeRuns = optionalNumber(seasonStat.homeRuns) ?? optionalNumber(advancedStat.homeRuns) ?? 0;
   const walks = optionalNumber(seasonStat.baseOnBalls) ?? 0;
   const hitBatters = optionalNumber(seasonStat.hitBatsmen) ?? 0;
@@ -487,7 +498,7 @@ function calculateXFip(
 
   if (!inningsPitched || inningsPitched <= 0) return undefined;
 
-  const totalFlyBalls = flyOuts + flyHits + homeRuns;
+  const totalFlyBalls = directFlyBalls ?? flyOuts + flyHits + homeRuns;
   if (totalFlyBalls <= 0) return undefined;
 
   const expectedHomeRuns = totalFlyBalls * leagueHrPerFlyBall;

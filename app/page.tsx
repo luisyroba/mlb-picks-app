@@ -591,7 +591,7 @@ function getDataQualitySummary(game: NormalizedGameData) {
 
 function getMetricRating(label: string, value: number | null | undefined): 'good' | 'mid' | 'bad' {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 'bad';
-  if (label === 'Probabilidad') {
+  if (label === 'Probabilidad' || label === 'Prob calibrada') {
     if (value >= 62) return 'good';
     if (value >= 55) return 'mid';
     return 'bad';
@@ -1545,7 +1545,7 @@ const AnalysisModal = memo(function AnalysisModal({
 
                     <div className="mt-4 space-y-3">
                       <MetricRail
-                        label="Probabilidad"
+                        label="Prob calibrada"
                         value={(analysis?.uiSummary?.finalPick?.probability ?? 0) * 100}
                         max={100}
                         format={(value) => fmtProb(typeof value === 'number' ? value / 100 : null)}

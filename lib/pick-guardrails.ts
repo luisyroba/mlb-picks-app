@@ -95,6 +95,9 @@ export function applyTotalPitchingGuardrails(
 
   const metrics = repricePickMetrics({
     estimatedProbability: pick.estimatedProbability ?? null,
+    rawEstimatedProbability: pick.rawEstimatedProbability ?? null,
+    pRaw: pick.pRaw ?? null,
+    pCalibrated: pick.pCalibrated ?? null,
     odds: pick.odds ?? null,
     edge: pick.edge ?? null,
     ev: pick.ev ?? null
@@ -104,16 +107,27 @@ export function applyTotalPitchingGuardrails(
     pick.market === 'F5'
       ? distribution.f5TotalMean
       : distribution.totalMean;
+  const projectedHomeRuns =
+    pick.market === 'F5' ? distribution.muHomeF5 : distribution.muHome;
+  const projectedAwayRuns =
+    pick.market === 'F5' ? distribution.muAwayF5 : distribution.muAway;
   const lineDelta = projectedTotal - line;
   const homeStarter = game.homeTeam.starter;
   const awayStarter = game.awayTeam.starter;
-  const bothElite =
-    isEliteStarter(homeStarter) && isEliteStarter(awayStarter);
+  const homeElite = isEliteStarter(homeStarter);
+  const awayElite = isEliteStarter(awayStarter);
+  const eliteCount = Number(homeElite) + Number(awayElite);
+  const bothElite = homeElite && awayElite;
   const lowSampleRisk =
     isLowSampleRunPreventionRisk(homeStarter) ||
     isLowSampleRunPreventionRisk(awayStarter);
   const edgeCalibrated = metrics.edgeCalibrated ?? -1;
   const evCalibrated = metrics.evCalibrated ?? -1;
+  const lowRunsAgainstEliteThreshold = pick.market === 'F5' ? 2.05 : 3.65;
+  const lowRunsAgainstElite =
+    (homeElite && projectedAwayRuns < lowRunsAgainstEliteThreshold) ||
+    (awayElite && projectedHomeRuns < lowRunsAgainstEliteThreshold);
+  const oneEliteDeltaThreshold = pick.market === 'F5' ? 0.75 : 1.35;
 
   if (
     bothElite &&
@@ -122,6 +136,19 @@ export function applyTotalPitchingGuardrails(
     return makePass(
       pick,
       `No bet: over bloqueado por dos abridores elite. Delta ${lineDelta.toFixed(2)} carreras, edge calibrado ${(edgeCalibrated * 100).toFixed(1)}pp y EV calibrado ${evCalibrated.toFixed(3)} no superan el umbral especial.`
+    );
+  }
+
+  if (
+    eliteCount >= 1 &&
+    lowRunsAgainstElite &&
+    (edgeCalibrated < 0.18 ||
+      evCalibrated < 0.12 ||
+      lineDelta < oneEliteDeltaThreshold)
+  ) {
+    return makePass(
+      pick,
+      `No bet: over bloqueado por abridor As en un lado. Proyección contra el As queda baja (${projectedAwayRuns.toFixed(2)} visitante / ${projectedHomeRuns.toFixed(2)} local), delta ${lineDelta.toFixed(2)}, edge calibrado ${(edgeCalibrated * 100).toFixed(1)}pp y EV calibrado ${evCalibrated.toFixed(3)}.`
     );
   }
 

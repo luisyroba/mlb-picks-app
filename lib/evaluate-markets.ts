@@ -15,6 +15,7 @@ import {
   probabilityTotal
 } from './probability-model';
 import { SCORING_THRESHOLDS } from './weights';
+import { buildAuditMetrics } from './audit-metrics';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -78,14 +79,25 @@ function buildEvaluation(
   line?: number
 ): MarketEvaluation {
   const implied = impliedProbability(odds);
-  const edge = estimatedProbability - implied;
-  const ev = expectedValue(estimatedProbability, odds);
+  const rawEdge = estimatedProbability - implied;
+  const rawEv = expectedValue(estimatedProbability, odds);
+  const auditMetrics = buildAuditMetrics({
+    estimatedProbability,
+    impliedProbability: implied,
+    odds,
+    edge: rawEdge,
+    ev: rawEv
+  });
+  const calibratedProbability =
+    auditMetrics.p_calibrated ?? estimatedProbability;
+  const edge = auditMetrics.edge_calibrated ?? calibratedProbability - implied;
+  const ev = auditMetrics.ev_calibrated ?? expectedValue(calibratedProbability, odds);
 
   let confidence: 'A' | 'B' | 'C' = 'C';
 
-  if (edge >= 0.1 && ev >= 0.04 && odds <= 2.1) {
+  if (edge >= 0.095 && ev >= 0.045 && odds <= 2.05) {
     confidence = 'A';
-  } else if (edge >= 0.06 && ev >= 0.015) {
+  } else if (edge >= 0.055 && ev >= 0.018) {
     confidence = 'B';
   }
 
@@ -94,12 +106,19 @@ function buildEvaluation(
     selection,
     line,
     odds,
-    estimatedProbability,
+    estimatedProbability: calibratedProbability,
+    rawEstimatedProbability: estimatedProbability,
     impliedProbability: implied,
     edge,
     ev,
+    pRaw: auditMetrics.p_raw,
+    pCalibrated: calibratedProbability,
+    edgeRaw: auditMetrics.edge_raw,
+    edgeCalibrated: edge,
+    evRaw: auditMetrics.ev_raw,
+    evCalibrated: ev,
     confidence,
-    reason
+    reason: `${reason}. Prob calibrada ${describeProbability(calibratedProbability)}`
   };
 
   return {

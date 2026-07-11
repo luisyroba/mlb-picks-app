@@ -279,9 +279,16 @@ export interface MarketEvaluation {
 
   odds: number;
   estimatedProbability: number; // 0-1
+  rawEstimatedProbability?: number;
   impliedProbability: number; // 0-1
   edge: number; // estimated - implied
   ev: number; // expected value
+  pRaw?: number | null;
+  pCalibrated?: number | null;
+  edgeRaw?: number | null;
+  edgeCalibrated?: number | null;
+  evRaw?: number | null;
+  evCalibrated?: number | null;
 
   confidence: ConfidenceLevel;
   reason: string;
@@ -294,9 +301,16 @@ export interface StoredAlternativeMarket {
   line?: number;
   odds: number;
   estimatedProbability: number;
+  rawEstimatedProbability?: number;
   impliedProbability: number;
   edge: number;
   ev: number;
+  pRaw?: number | null;
+  pCalibrated?: number | null;
+  edgeRaw?: number | null;
+  edgeCalibrated?: number | null;
+  evRaw?: number | null;
+  evCalibrated?: number | null;
   confidence: ConfidenceLevel;
   reason: string;
   selectionScore?: number;
@@ -309,9 +323,16 @@ export interface FinalPickDecision {
   odds?: number;
 
   estimatedProbability?: number;
+  rawEstimatedProbability?: number;
   impliedProbability?: number;
   edge?: number;
   ev?: number;
+  pRaw?: number | null;
+  pCalibrated?: number | null;
+  edgeRaw?: number | null;
+  edgeCalibrated?: number | null;
+  evRaw?: number | null;
+  evCalibrated?: number | null;
   selectionScore?: number;
 
   confidence: ConfidenceLevel;

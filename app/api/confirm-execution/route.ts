@@ -356,6 +356,8 @@ export async function POST(req: NextRequest) {
           })();
       const executionMetrics = repricePickMetrics({
         estimatedProbability: pickContext.estimatedProbability,
+        pRaw: pickContext.pRaw,
+        pCalibrated: pickContext.pCalibrated,
         odds: result.usedOdds ?? pickContext.odds,
         edge: pickContext.edge,
         ev: pickContext.ev

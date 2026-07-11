@@ -1642,13 +1642,24 @@ function buildAnalyzePayload(
   matchingMarketEvent: ReturnType<typeof findMatchingMarketEvent>,
   executionRecommendation: ReturnType<typeof chooseBestExecution> | null
 ) {
-  const finalPickAuditMetrics = buildAuditMetrics({
-    estimatedProbability: finalPick.estimatedProbability ?? null,
-    impliedProbability: finalPick.impliedProbability ?? null,
-    odds: finalPick.odds ?? null,
-    edge: finalPick.edge ?? null,
-    ev: finalPick.ev ?? null
-  });
+  const finalPickAuditMetrics =
+    typeof finalPick.pRaw === 'number' ||
+    typeof finalPick.pCalibrated === 'number'
+      ? {
+          p_raw: finalPick.pRaw ?? finalPick.rawEstimatedProbability ?? null,
+          p_calibrated: finalPick.pCalibrated ?? finalPick.estimatedProbability ?? null,
+          edge_raw: finalPick.edgeRaw ?? null,
+          edge_calibrated: finalPick.edgeCalibrated ?? finalPick.edge ?? null,
+          ev_raw: finalPick.evRaw ?? null,
+          ev_calibrated: finalPick.evCalibrated ?? finalPick.ev ?? null
+        }
+      : buildAuditMetrics({
+          estimatedProbability: finalPick.estimatedProbability ?? null,
+          impliedProbability: finalPick.impliedProbability ?? null,
+          odds: finalPick.odds ?? null,
+          edge: finalPick.edge ?? null,
+          ev: finalPick.ev ?? null
+        });
   const dataQuality = getDataQualitySummary(engineGame);
   const normalizedExecutionRecommendation = executionRecommendation
     ? {
@@ -1882,6 +1893,9 @@ function shouldSyncConfirmedPickCanonicalFields(
 
   const expectedMetrics = repricePickMetrics({
     estimatedProbability: finalPick.estimatedProbability ?? null,
+    rawEstimatedProbability: finalPick.rawEstimatedProbability ?? null,
+    pRaw: finalPick.pRaw ?? null,
+    pCalibrated: finalPick.pCalibrated ?? null,
     odds: pick.execution_odds ?? finalPick.odds ?? null,
     edge: finalPick.edge ?? null,
     ev: finalPick.ev ?? null
@@ -2635,6 +2649,9 @@ export async function GET(req: NextRequest) {
       const f5NeedsManualOdds = isF5PickPendingManualOdds(guardedFinalPick);
       const autoMetrics = repricePickMetrics({
         estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+        rawEstimatedProbability: guardedFinalPick.rawEstimatedProbability ?? null,
+        pRaw: guardedFinalPick.pRaw ?? null,
+        pCalibrated: guardedFinalPick.pCalibrated ?? null,
         odds: guardedFinalPick.odds ?? null,
         edge: guardedFinalPick.edge ?? null,
         ev: guardedFinalPick.ev ?? null
@@ -2772,6 +2789,9 @@ export async function GET(req: NextRequest) {
     ) {
       const syncMetrics = repricePickMetrics({
         estimatedProbability: guardedFinalPick.estimatedProbability ?? null,
+        rawEstimatedProbability: guardedFinalPick.rawEstimatedProbability ?? null,
+        pRaw: guardedFinalPick.pRaw ?? null,
+        pCalibrated: guardedFinalPick.pCalibrated ?? null,
         odds: latestPick.execution_odds ?? guardedFinalPick.odds ?? null,
         edge: guardedFinalPick.edge ?? null,
         ev: guardedFinalPick.ev ?? null
