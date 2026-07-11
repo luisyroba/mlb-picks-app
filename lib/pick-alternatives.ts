@@ -16,11 +16,19 @@ function toStoredAlternativeMarket(
     line: candidate.line,
     odds: candidate.odds,
     estimatedProbability: candidate.estimatedProbability,
+    rawEstimatedProbability: candidate.rawEstimatedProbability,
     impliedProbability: candidate.impliedProbability,
     edge: candidate.edge,
     ev: candidate.ev,
+    pRaw: candidate.pRaw,
+    pCalibrated: candidate.pCalibrated,
+    edgeRaw: candidate.edgeRaw,
+    edgeCalibrated: candidate.edgeCalibrated,
+    evRaw: candidate.evRaw,
+    evCalibrated: candidate.evCalibrated,
     confidence: candidate.confidence,
     reason: candidate.reason,
+    marketSuitability: candidate.marketSuitability,
     selectionScore: isFiniteNumber(candidate.selectionScore)
       ? candidate.selectionScore
       : undefined
@@ -62,11 +70,21 @@ export function parseStoredAlternativeMarket(
       line: isFiniteNumber(parsed.line) ? parsed.line : undefined,
       odds: parsed.odds,
       estimatedProbability: parsed.estimatedProbability,
+      rawEstimatedProbability: isFiniteNumber(parsed.rawEstimatedProbability)
+        ? parsed.rawEstimatedProbability
+        : undefined,
       impliedProbability: parsed.impliedProbability,
       edge: parsed.edge,
       ev: parsed.ev,
+      pRaw: isFiniteNumber(parsed.pRaw) ? parsed.pRaw : undefined,
+      pCalibrated: isFiniteNumber(parsed.pCalibrated) ? parsed.pCalibrated : undefined,
+      edgeRaw: isFiniteNumber(parsed.edgeRaw) ? parsed.edgeRaw : undefined,
+      edgeCalibrated: isFiniteNumber(parsed.edgeCalibrated) ? parsed.edgeCalibrated : undefined,
+      evRaw: isFiniteNumber(parsed.evRaw) ? parsed.evRaw : undefined,
+      evCalibrated: isFiniteNumber(parsed.evCalibrated) ? parsed.evCalibrated : undefined,
       confidence: parsed.confidence as StoredAlternativeMarket['confidence'],
       reason: parsed.reason,
+      marketSuitability: parsed.marketSuitability,
       selectionScore: isFiniteNumber(parsed.selectionScore)
         ? parsed.selectionScore
         : undefined

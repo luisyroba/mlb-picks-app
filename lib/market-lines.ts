@@ -1017,11 +1017,13 @@ function pickMainMoneylinePair(
 function pickMainRunLine(
   lines: MarketLine[]
 ): { home: { line: number; odds: number }; away: { line: number; odds: number } } | undefined {
-  const candidates = getSpreadPairs(lines, 'RL').filter(
+  const allPairs = getSpreadPairs(lines, 'RL');
+  const primaryPairs = allPairs.filter(
     (pair) =>
       getLinePrimarySupport(pair.home) > 0 &&
       getLinePrimarySupport(pair.away) > 0
   );
+  const candidates = primaryPairs.length ? primaryPairs : allPairs;
 
   if (!candidates.length) return undefined;
 

@@ -366,6 +366,7 @@ export function mapEspnToEngineGame(
       starter: {
         playerId: espnGame.homeTeam.probableStarter?.playerId || undefined,
         name: espnGame.homeTeam.probableStarter?.name ?? 'TBD',
+        headshot: espnGame.homeTeam.probableStarter?.headshot ?? undefined,
         handedness: espnGame.homeTeam.probableStarter?.handedness,
         era: homeStarterEra,
         whip: espnGame.homeTeam.probableStarter?.whip ?? undefined,
@@ -463,6 +464,7 @@ export function mapEspnToEngineGame(
       starter: {
         playerId: espnGame.awayTeam.probableStarter?.playerId || undefined,
         name: espnGame.awayTeam.probableStarter?.name ?? 'TBD',
+        headshot: espnGame.awayTeam.probableStarter?.headshot ?? undefined,
         handedness: espnGame.awayTeam.probableStarter?.handedness,
         era: awayStarterEra,
         whip: espnGame.awayTeam.probableStarter?.whip ?? undefined,

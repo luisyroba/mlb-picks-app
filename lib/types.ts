@@ -14,6 +14,14 @@ export type AdvantageLabel =
 export type ScoringProjection = 'low' | 'medium' | 'high';
 
 export type ConfidenceLevel = 'A' | 'B' | 'C' | 'PASS';
+export type StarterTier =
+  | 'elite'
+  | 'strong'
+  | 'average'
+  | 'weak'
+  | 'disaster'
+  | 'low_sample_risk'
+  | 'unknown';
 
 export type WeightProfileName =
   | 'FULL_GAME_SIDE'
@@ -54,6 +62,7 @@ export interface TeamCoreStats {
 export interface StartingPitcherStats {
   playerId?: string;
   name?: string;
+  headshot?: string;
   handedness?: 'R' | 'L' | 'S';
 
   era?: number;
@@ -293,6 +302,7 @@ export interface MarketEvaluation {
   confidence: ConfidenceLevel;
   reason: string;
   selectionScore?: number;
+  marketSuitability?: MarketSuitabilityAudit;
 }
 
 export interface StoredAlternativeMarket {
@@ -314,6 +324,7 @@ export interface StoredAlternativeMarket {
   confidence: ConfidenceLevel;
   reason: string;
   selectionScore?: number;
+  marketSuitability?: MarketSuitabilityAudit;
 }
 
 export interface FinalPickDecision {
@@ -337,6 +348,7 @@ export interface FinalPickDecision {
 
   confidence: ConfidenceLevel;
   executionReason: string;
+  marketSuitability?: MarketSuitabilityAudit;
 
   altMarket1?: string;
   altMarket2?: string;
@@ -352,6 +364,36 @@ export interface FinalPickDecision {
     candidateCountBeforeRecalc?: number;
     candidateCountAfterRecalc?: number;
     recalculatedScoreBreakdown?: ScoreBreakdownEntry[];
+    marketAudit?: MarketSuitabilityAudit[];
+  };
+}
+
+export interface StarterClassification {
+  tier: StarterTier;
+  score: number;
+  reliability: number;
+  label: string;
+  reasons: string[];
+}
+
+export interface MarketSuitabilityAudit {
+  score: number;
+  scoreAdjustment: number;
+  confidenceCap?: Exclude<ConfidenceLevel, 'PASS'>;
+  tags: string[];
+  notes: string[];
+  starter: {
+    home: StarterClassification;
+    away: StarterClassification;
+  };
+  totalSupport?: {
+    bilateral: boolean;
+    environmentOk: boolean;
+    lineupOk: boolean;
+    eliteSuppression: boolean;
+    projectedHomeRuns: number;
+    projectedAwayRuns: number;
+    projectedTotal: number;
   };
 }
 

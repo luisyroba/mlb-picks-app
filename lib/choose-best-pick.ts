@@ -2,6 +2,7 @@ import {
   FinalPickDecision,
   LayerAOutput,
   MarketEvaluation,
+  MarketSuitabilityAudit,
   NormalizedGameData,
   WeightProfileName
 } from './types';
@@ -62,6 +63,7 @@ function toFinalPick(
     evRaw: best.evRaw,
     evCalibrated: best.evCalibrated,
     selectionScore: best.selectionScore,
+    marketSuitability: best.marketSuitability,
 
     confidence: best.confidence,
     executionReason: best.reason,
@@ -95,6 +97,50 @@ function isCandidateViable(candidate: MarketEvaluation): boolean {
     candidate.edge >= LOW_CONFIDENCE_EDGE_MIN &&
     candidate.ev >= LOW_CONFIDENCE_EV_MIN
   );
+}
+
+function isOverTotal(candidate: MarketEvaluation): boolean {
+  return (
+    (candidate.market === 'TOTAL' || candidate.market === 'F5') &&
+    /(^|\s)over(\s|$)/i.test(candidate.selection)
+  );
+}
+
+function isSideCandidate(candidate: MarketEvaluation): boolean {
+  if (candidate.market === 'ML' || candidate.market === 'RL') return true;
+  return candidate.market === 'F5' && !/(^|\s)(over|under)(\s|$)/i.test(candidate.selection);
+}
+
+function pickRouterPreferredCandidate(
+  candidates: RecalculatedCandidateResult[]
+): RecalculatedCandidateResult | null {
+  const top = candidates[0];
+  if (!top || !isOverTotal(top.confirmedCandidate)) {
+    return top ?? null;
+  }
+
+  const topScore =
+    top.confirmedCandidate.selectionScore ?? top.confirmedCandidate.ev;
+
+  const sideCandidate = candidates.find((entry) => {
+    const candidate = entry.confirmedCandidate;
+    const score = candidate.selectionScore ?? candidate.ev;
+    return (
+      isSideCandidate(candidate) &&
+      candidate.marketSuitability?.tags.includes('side-priority') &&
+      candidate.edge >= 0.055 &&
+      candidate.ev >= 0.08 &&
+      score >= topScore - 24
+    );
+  });
+
+  return sideCandidate ?? top;
+}
+
+function isMarketSuitabilityAudit(
+  value: MarketEvaluation['marketSuitability']
+): value is MarketSuitabilityAudit {
+  return Boolean(value);
 }
 
 function isSameCandidate(
@@ -187,7 +233,7 @@ export function chooseBestPick(
   }
 
   const recalculatedCandidates = initialCandidates
-    .map((preliminaryBest) => {
+    .map<RecalculatedCandidateResult | null>((preliminaryBest) => {
       const recalculatedProfile = getProfileFromMarket(preliminaryBest.market);
 
       const recalculatedScore = recalculatePregameScore(
@@ -240,7 +286,12 @@ export function chooseBestPick(
       return {
         confirmedCandidate,
         viableAlternatives,
-        fullDebug
+        fullDebug: {
+          ...fullDebug,
+          marketAudit: finalCandidates
+            .map((candidate) => candidate.marketSuitability)
+            .filter(isMarketSuitabilityAudit)
+        }
       } satisfies RecalculatedCandidateResult;
     })
     .filter(
@@ -272,7 +323,9 @@ export function chooseBestPick(
     });
 
   if (recalculatedCandidates.length) {
-    const bestResult = recalculatedCandidates[0];
+    const bestResult =
+      pickRouterPreferredCandidate(recalculatedCandidates) ??
+      recalculatedCandidates[0];
 
     return toFinalPick(
       bestResult.confirmedCandidate,

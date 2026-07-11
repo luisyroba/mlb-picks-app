@@ -15,9 +15,11 @@ import {
 } from '@/lib/data-quality';
 import type {
   LayerAOutput,
+  MarketSuitabilityAudit,
   NormalizedGameData,
   ScoreBreakdownEntry
 } from '@/lib/types';
+import { classifyStarter } from '@/lib/market-suitability';
 
 type TeamSummary = {
   name: string;
@@ -94,6 +96,7 @@ type AnalyzeResponse = {
     lean: string;
     confidence: string;
     scoreBreakdown?: ScoreBreakdownEntry[] | null;
+    marketAudit?: MarketSuitabilityAudit[] | null;
     marketView: {
       marketFamily: string;
       selection: string;
@@ -108,6 +111,7 @@ type AnalyzeResponse = {
       probability: number | null;
       edge: number | null;
       ev: number | null;
+      marketSuitability?: MarketSuitabilityAudit | null;
     };
     execution: {
       status: string;
@@ -1242,6 +1246,147 @@ function StatGroupCard({
   );
 }
 
+function StarterHeadshot({
+  src,
+  name
+}: {
+  src?: string | null;
+  name?: string | null;
+}) {
+  if (src) {
+    return (
+      <Image
+        src={src}
+        alt={name ?? 'Pitcher'}
+        width={54}
+        height={54}
+        className="h-14 w-14 rounded-full border border-white/70 bg-white object-cover shadow-sm"
+      />
+    );
+  }
+
+  const initials = String(name ?? 'P')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || 'P';
+
+  return (
+    <div className="grid h-14 w-14 place-items-center rounded-full border border-[var(--line-soft)] bg-white text-sm font-semibold text-[var(--ink-strong)] shadow-sm">
+      {initials}
+    </div>
+  );
+}
+
+function PitcherMatchupCard({ game }: { game: NormalizedGameData }) {
+  const awayClassification = classifyStarter(game.awayTeam.starter);
+  const homeClassification = classifyStarter(game.homeTeam.starter);
+
+  return (
+    <section className="rounded-[1.35rem] border border-[var(--line-soft)] bg-white/82 p-3.5">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--ink-muted)]">
+        Abridores
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {[
+          { team: game.awayTeam, classification: awayClassification, label: 'Visitante' },
+          { team: game.homeTeam, classification: homeClassification, label: 'Local' }
+        ].map(({ team, classification, label }) => (
+          <div key={`${team.core.abbreviation}-starter`} className="rounded-[1.15rem] bg-[var(--surface-soft)] p-3">
+            <div className="flex items-center gap-3">
+              <StarterHeadshot src={team.starter.headshot} name={team.starter.name} />
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--ink-muted)]">
+                  {label} / {team.core.abbreviation}
+                </div>
+                <div className="truncate text-base font-semibold text-[var(--ink-strong)]">
+                  {team.starter.name ?? 'TBD'}
+                </div>
+                <div className="mt-1 inline-flex rounded-full border border-[var(--line-soft)] bg-white px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                  {classification.label}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
+              <div>
+                <div className="text-[10px] uppercase text-[var(--ink-muted)]">ERA</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{fmtNum(team.starter.era, 2)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[var(--ink-muted)]">WHIP</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{fmtNum(team.starter.whip, 2)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[var(--ink-muted)]">IP</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{fmtNum(team.starter.inningsPitched, 1)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-[var(--ink-muted)]">K-BB</div>
+                <div className="font-semibold text-[var(--ink-strong)]">{fmtNum(team.starter.kMinusBbRate, 1)}</div>
+              </div>
+            </div>
+            <div className="mt-2 text-[11px] text-[var(--ink-soft)]">
+              {classification.reasons.slice(0, 2).join(' / ')}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MarketAuditCard({
+  audit
+}: {
+  audit?: MarketSuitabilityAudit | null;
+}) {
+  if (!audit) return null;
+
+  return (
+    <div className="mt-4 rounded-[1.1rem] border border-[rgba(8,26,53,0.08)] bg-white/72 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--ink-muted)]">
+          Auditoria de mercado
+        </div>
+        <div className="text-sm font-semibold text-[var(--ink-strong)]">{fmtNum(audit.score, 0)}/100</div>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {audit.tags.length ? audit.tags.map((tag) => (
+          <span key={tag} className="rounded-full border border-[var(--line-soft)] bg-[var(--surface-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-soft)]">
+            {tag}
+          </span>
+        )) : (
+          <span className="text-xs text-[var(--ink-soft)]">Sin tags especiales.</span>
+        )}
+      </div>
+      {audit.totalSupport ? (
+        <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
+          <div className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-2">
+            <div className="text-[10px] uppercase text-[var(--ink-muted)]">Bilateral</div>
+            <div className="font-semibold text-[var(--ink-strong)]">{audit.totalSupport.bilateral ? 'OK' : 'Debil'}</div>
+          </div>
+          <div className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-2">
+            <div className="text-[10px] uppercase text-[var(--ink-muted)]">Parque/clima</div>
+            <div className="font-semibold text-[var(--ink-strong)]">{audit.totalSupport.environmentOk ? 'OK' : 'No apoya'}</div>
+          </div>
+          <div className="rounded-[0.85rem] bg-[var(--surface-soft)] px-2.5 py-2">
+            <div className="text-[10px] uppercase text-[var(--ink-muted)]">Proy.</div>
+            <div className="font-semibold text-[var(--ink-strong)]">
+              {fmtNum(audit.totalSupport.projectedAwayRuns, 2)} / {fmtNum(audit.totalSupport.projectedHomeRuns, 2)}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {audit.notes.length ? (
+        <div className="mt-2 space-y-1 text-xs text-[var(--ink-soft)]">
+          {audit.notes.map((note) => <div key={note}>{note}</div>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const AnalysisModal = memo(function AnalysisModal({
   open,
   game,
@@ -1460,10 +1605,13 @@ const AnalysisModal = memo(function AnalysisModal({
                     Cargando comparativas extendidas del matchup...
                   </div>
                 ) : engineGame ? (
-                  <div className="grid gap-3 xl:grid-cols-2">
-                    {STAT_GROUPS.map((group) => (
-                      <StatGroupCard key={group.title} group={group} game={engineGame} />
-                    ))}
+                  <div className="space-y-3">
+                    <PitcherMatchupCard game={engineGame} />
+                    <div className="grid gap-3 xl:grid-cols-2">
+                      {STAT_GROUPS.map((group) => (
+                        <StatGroupCard key={group.title} group={group} game={engineGame} />
+                      ))}
+                    </div>
                   </div>
                 ) : (
                   <div className="glass-panel rounded-[1.5rem] p-5 text-sm text-[var(--ink-soft)]">
@@ -1563,6 +1711,7 @@ const AnalysisModal = memo(function AnalysisModal({
                         format={(value) => fmtNum(value, 3)}
                       />
                     </div>
+                    <MarketAuditCard audit={analysis?.uiSummary?.finalPick?.marketSuitability} />
                   </div>
                 </section>
 

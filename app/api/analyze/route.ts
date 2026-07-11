@@ -576,6 +576,7 @@ function serializeStarterForDebug(starter: ReturnType<typeof mapEspnToEngineGame
   return {
     playerId: starter.playerId,
     name: starter.name,
+    headshot: starter.headshot,
     era: starter.era,
     fip: starter.fip,
     xfip: starter.xfip,
@@ -1692,6 +1693,7 @@ function buildAnalyzePayload(
       lean: layerA.lean,
       confidence: layerA.confidence,
       scoreBreakdown: layerA.scoreBreakdown ?? null,
+      marketAudit: finalPick.debug?.marketAudit ?? null,
 
       marketView: marketView
         ? {
@@ -1717,7 +1719,8 @@ function buildAnalyzePayload(
               edge_raw: roundMetric(finalPickAuditMetrics.edge_raw),
               edge_calibrated: roundMetric(finalPickAuditMetrics.edge_calibrated),
               ev_raw: roundMetric(finalPickAuditMetrics.ev_raw),
-              ev_calibrated: roundMetric(finalPickAuditMetrics.ev_calibrated)
+              ev_calibrated: roundMetric(finalPickAuditMetrics.ev_calibrated),
+              marketSuitability: finalPick.marketSuitability ?? null
             }
           : {
               market: 'PASS',
@@ -1731,7 +1734,8 @@ function buildAnalyzePayload(
               edge_raw: null,
               edge_calibrated: null,
               ev_raw: null,
-              ev_calibrated: null
+              ev_calibrated: null,
+              marketSuitability: null
             },
 
       execution:

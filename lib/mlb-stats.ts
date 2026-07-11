@@ -1737,12 +1737,14 @@ async function getOfficialStarterContext(
 function buildMlbStarterFailure(params: {
   playerId?: number;
   playerName?: string;
+  fallbackHeadshot?: string;
   fallbackHandedness?: StartingPitcherStats['handedness'];
   reason: string;
 }): StartingPitcherStats {
   return {
     playerId: params.playerId ? String(params.playerId) : undefined,
     name: params.playerName ?? 'TBD',
+    headshot: params.fallbackHeadshot,
     handedness: params.fallbackHandedness,
     status: params.playerId ? 'probable' : 'unknown',
     source: params.playerId ? 'mlb_schedule_probable' : 'unknown',
@@ -1836,17 +1838,22 @@ async function resolveOfficialStarterContext(params: {
       await params.leaguePitchingContextPromise,
       params.fallback.handedness
     );
+    const starterWithFallbackMedia = {
+      ...starter,
+      headshot: starter.headshot ?? params.fallback.headshot
+    };
     logOfficialStarterStats({
       gameId: params.gameId,
       side: params.side,
       team: params.team,
-      starter
+      starter: starterWithFallbackMedia
     });
-    return starter;
+    return starterWithFallbackMedia;
   } catch (error) {
     const starter = buildMlbStarterFailure({
       playerId: params.playerId,
       playerName: params.playerName,
+      fallbackHeadshot: params.fallback.headshot,
       fallbackHandedness: params.fallback.handedness,
       reason: error instanceof Error ? error.message : 'Unknown MLB people stats error'
     });

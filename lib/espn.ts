@@ -98,6 +98,10 @@ export interface EspnCompetitorProbable {
     id?: string | number;
     displayName?: string;
     fullName?: string;
+    headshot?: {
+      href?: string;
+      alt?: string;
+    } | string;
     throws?: {
       abbreviation?: string;
       displayValue?: string;
@@ -338,6 +342,7 @@ export interface NormalizedTeamStatistics {
 export interface NormalizedProbableStarter {
   playerId: string;
   name: string;
+  headshot?: string | null;
   era: number | null;
   handedness?: 'R' | 'L' | 'S';
   whip?: number | null;
@@ -639,6 +644,7 @@ function getProbableStarter(
       probable.athlete?.displayName ??
       probable.athlete?.fullName ??
       'Unknown',
+    headshot: readHeadshotHref(probable.athlete?.headshot),
     era,
     handedness,
     whip,

@@ -16,6 +16,10 @@ import {
 } from './probability-model';
 import { SCORING_THRESHOLDS } from './weights';
 import { buildAuditMetrics } from './audit-metrics';
+import {
+  assessMarketSuitability,
+  capConfidence
+} from './market-suitability';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -68,6 +72,14 @@ function getSelectionScore(
       marketReliability
     ).toFixed(3)
   );
+}
+
+function getAdjustedSelectionScore(
+  candidate: Omit<MarketEvaluation, 'selectionScore'>
+): number {
+  const baseScore = getSelectionScore(candidate);
+  const adjustment = candidate.marketSuitability?.scoreAdjustment ?? 0;
+  return Number(clamp(baseScore + adjustment, 0, 96).toFixed(3));
 }
 
 function buildEvaluation(
@@ -191,7 +203,11 @@ function evaluateRL(
     return [];
   }
 
-  if (margin > 0 && odds.homeRL?.line !== undefined) {
+  if (
+    margin > 0 &&
+    odds.homeRL?.line !== undefined &&
+    (odds.homeRL.line < 0 || !odds.homeML)
+  ) {
     const prob = probabilityRunLine(distribution, 'home', odds.homeRL.line);
     return [
       buildEvaluation(
@@ -205,7 +221,11 @@ function evaluateRL(
     ];
   }
 
-  if (margin < 0 && odds.awayRL?.line !== undefined) {
+  if (
+    margin < 0 &&
+    odds.awayRL?.line !== undefined &&
+    (odds.awayRL.line < 0 || !odds.awayML)
+  ) {
     const prob = probabilityRunLine(distribution, 'away', odds.awayRL.line);
     return [
       buildEvaluation(
@@ -220,6 +240,33 @@ function evaluateRL(
   }
 
   return [];
+}
+
+function applySuitability(
+  game: NormalizedGameData,
+  layerA: LayerAOutput,
+  distribution: ReturnType<typeof buildGameDistribution>,
+  candidate: MarketEvaluation
+): MarketEvaluation {
+  const marketSuitability = assessMarketSuitability(game, layerA, distribution, candidate);
+  const confidence = capConfidence(
+    candidate.confidence,
+    marketSuitability.confidenceCap
+  );
+  const reasonSuffix = marketSuitability.notes.length
+    ? ` Suitability: ${marketSuitability.notes.join('; ')}.`
+    : '';
+  const adjustedCandidate: Omit<MarketEvaluation, 'selectionScore'> = {
+    ...candidate,
+    confidence,
+    marketSuitability,
+    reason: `${candidate.reason}${reasonSuffix}`
+  };
+
+  return {
+    ...adjustedCandidate,
+    selectionScore: getAdjustedSelectionScore(adjustedCandidate)
+  };
 }
 
 function evaluateF5Side(
@@ -478,6 +525,7 @@ export function evaluateMarkets(
   ];
 
   return candidates
+    .map((candidate) => applySuitability(game, layerA, distribution, candidate))
     .filter((candidate) => candidate.edge > 0 && candidate.ev > 0)
     .sort((left, right) => {
       const scoreGap =
